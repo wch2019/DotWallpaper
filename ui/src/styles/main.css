@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+/* ============================================================
+   DotWallpaper 设计令牌（Tailwind CSS v4 @theme）
+   深色沉浸式壁纸控制台：中性色偏冷蓝调，主强调为冰蓝
+   ============================================================ */
+@theme {
+  /* 背景层级 */
+  --color-base: #0a0e15;        /* 窗口底色（偏冷深蓝黑） */
+  --color-base-2: #0e131c;      /* 次级底色 */
+  --color-panel: #121826;       /* 面板 */
+  --color-panel-2: #171e2e;     /* 浮层/悬停底 */
+  --color-elev: #1e2739;        /* 弹层/高亮底 */
+
+  /* 文字 */
+  --color-tx: #e7ebf3;          /* 主文本 */
+  --color-dim: #9aa6ba;         /* 次级文本 */
+  --color-faint: #5f6c82;       /* 弱化文本 */
+
+  /* 边框 */
+  --color-line: rgb(255 255 255 / 0.07);
+  --color-line-2: rgb(255 255 255 / 0.14);
+
+  /* 功能色 */
+  --color-accent: #7fa8ff;      /* 冰蓝主色 */
+  --color-accent-strong: #5f8df0;
+  --color-accent-soft: rgb(127 168 255 / 0.16);
+  --color-ok: #43d19e;
+  --color-danger: #ff6b7d;
+  --color-danger-soft: rgb(255 107 125 / 0.16);
+
+  /* 字体 */
+  --font-sans:
+    "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI",
+    "Microsoft YaHei", system-ui, sans-serif;
+}
+
+/* ---------- 全局基础 ---------- */
+html,
+body,
+#app {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  background: transparent;
+  color: var(--color-tx);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+/* 拖拽区域（Tauri 无边框窗口） */
+.app-drag {
+  -webkit-app-region: drag;
+}
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* 细滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(255 255 255 / 0.14);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(255 255 255 / 0.24);
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 过渡动画（减少非必要动效） */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

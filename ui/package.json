@@ -1,0 +1,27 @@
+{
+  "name": "dot-wallpaper-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "DotWallpaper 壁纸工具 - Vue 3 前端（独立工程）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "lucide-vue-next": "^0.577.0",
+    "naive-ui": "^2.45.3",
+    "pinia": "^4.0.3",
+    "vue": "^3.4.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.4.1",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "tailwindcss": "^4.3.3",
+    "vite": "^5.4.21"
+  }
+}
