@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { confirmDanger, toast } from "../lib/naive-host";
 
 // ---------- 类型 ----------
@@ -13,14 +14,30 @@ export type WallpaperSource = "local" | "system";
 export interface WallpaperItem {
   key: string;
   kind: WallpaperKind; // 类型：本地 / 当前壁纸（右键目标）
-  path?: string; // 本地绝对路径
+  path?: string; // 本地绝对路径（原图）
   title?: string;
+  thumb?: string; // 缩略图绝对路径（列表加载用；无缩略图时为空）
   applying?: boolean; // 是否正在设置中
+}
+
+/// 后端列表命令返回条目：原图路径 + 缩略图路径（可能为空）
+interface WallpaperEntryData {
+  path: string;
+  thumb: string;
+}
+
+/// 后端后台缩略图完成事件 payload：原图路径 + 缩略图路径
+interface ThumbnailUpdatedPayload {
+  path: string;
+  thumb: string;
 }
 
 // ---------- 常量 ----------
 export const DIR_STORAGE_KEY = "dot-wallpaper-dir"; // localStorage 持久化键
 export const PAGE_SIZE = 12; // 每页加载张数
+
+// 后台缩略图事件监听全局只注册一次（应用单页生命周期内复用）
+let thumbnailListenerRegistered = false;
 
 // ---------- 纯工具函数 ----------
 export function shuffle<T>(arr: T[]): T[] {
@@ -40,6 +57,12 @@ export function baseName(path: string): string {
 // 图片能用于展示的地址：本地路径走 convertFileSrc
 export function displaySrc(item: WallpaperItem): string {
   return item.path ? convertFileSrc(item.path) : "";
+}
+
+// 列表缩略图 URL：基于后端生成的缩略图缓存路径（无缩略图时返回空串，
+// 由调用方显示占位；不回退原图，保证大图不进入列表加载链路）
+export function thumbSrc(item: WallpaperItem): string {
+  return item.thumb ? convertFileSrc(item.thumb) : "";
 }
 
 // 徽标文案（当前仅本地）
@@ -66,7 +89,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
   // 分页私有状态
   let loadedCount = 0;
-  let allPaths: string[] = [];
+  let allEntries: WallpaperEntryData[] = [];
   let loadingMoreLock = false;
   let hasMoreFlag = false;
 
@@ -89,13 +112,32 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     ctxReadOnly.value = false;
   }
 
+  // ---- 后台缩略图渐进更新 ----
+  // 后端列表命令不再等待全量缩略图生成：缺失项由后台线程池渐进生成，
+  // 每完成一张推送 "thumbnail-updated" { path, thumb }。命中当前列表条目时
+  // 仅更新该条 thumb（响应式触发对应 <img> :src 重算加载新图），不整列表刷新；
+  // 尚未被懒加载放行的条目无需处理，放行时自然取到最新 thumb。
+  async function registerThumbnailListener() {
+    if (thumbnailListenerRegistered) return;
+    thumbnailListenerRegistered = true;
+    await listen<ThumbnailUpdatedPayload>("thumbnail-updated", (ev) => {
+      const { path, thumb } = ev.payload;
+      if (!path || !thumb) return;
+      const item = gridItems.value.find((it) => it.path === path);
+      if (item && item.thumb !== thumb) {
+        item.thumb = thumb;
+      }
+    });
+  }
+  void registerThumbnailListener();
+
   // ---- 选项卡切换 ----
   async function setSource(next: WallpaperSource) {
     if (source.value === next) return;
     source.value = next;
     gridItems.value = [];
     loadedCount = 0;
-    allPaths = [];
+    allEntries = [];
     hasMoreFlag = false;
     allCount.value = 0;
     await loadWallpapers();
@@ -161,15 +203,16 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   async function loadWallpapers() {
     gridItems.value = [];
     loadedCount = 0;
-    allPaths = [];
+    allEntries = [];
     try {
-      allPaths =
+      // 后端列表返回：原图路径 + 缩略图路径（缩略图可能为空 → 列表显示占位）
+      allEntries =
         source.value === "system"
-          ? ((await invoke("list_system_wallpapers")) as string[])
+          ? ((await invoke("list_system_wallpapers")) as WallpaperEntryData[])
           : ((await invoke("list_local_wallpapers", {
               directory: resolveDirArg(),
-            })) as string[]);
-      allCount.value = allPaths.length;
+            })) as WallpaperEntryData[]);
+      allCount.value = allEntries.length;
       appendBatch();
     } catch (err: unknown) {
       toast("加载壁纸失败：" + ((err as Error)?.message || String(err)), "error");
@@ -177,17 +220,18 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   }
 
   function appendBatch() {
-    const batch = allPaths.slice(loadedCount, loadedCount + PAGE_SIZE);
-    batch.forEach((p) => {
+    const batch = allEntries.slice(loadedCount, loadedCount + PAGE_SIZE);
+    batch.forEach((e) => {
       gridItems.value.push({
-        key: "local_" + p,
+        key: "local_" + e.path,
         kind: "local" as WallpaperKind,
-        path: p,
-        title: baseName(p),
+        path: e.path,
+        title: baseName(e.path),
+        thumb: e.thumb || undefined,
       });
       loadedCount++;
     });
-    hasMoreFlag = loadedCount < allPaths.length;
+    hasMoreFlag = loadedCount < allEntries.length;
   }
 
   async function loadMore() {

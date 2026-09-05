@@ -1,11 +1,12 @@
 <script setup lang="ts">
 // Sidebar - 左栏：本地壁纸网格（分页加载 / 右键菜单 / 应用当前壁纸）
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
 import { NButton, NIcon, useMessage } from "naive-ui";
 import { FolderOpen } from "lucide-vue-next";
+import defaultJpg from '../assets/images/default.jpg'
 import {
   baseName,
-  displaySrc,
+  thumbSrc,
   useWallpaperStore,
   type WallpaperItem,
 } from "../stores/wallpaper";
@@ -20,6 +21,50 @@ const dirHint = computed(() => {
 });
 
 const gridWrap = ref<HTMLElement | null>(null);
+
+// ---- 列表缩略图懒加载（IntersectionObserver 驱动，接近视口才真正设置 src）----
+// revealed 记录已放行的 item.path（响应式 Set：add 会触发模板 :src 重新求值）
+const revealed = reactive(new Set<string>());
+let lazyObserver: IntersectionObserver | null = null;
+const lazyWatched = new Set<HTMLImageElement>(); // 已挂载观察的 img，避免重复 observe
+
+function getLazyObserver(): IntersectionObserver {
+  if (lazyObserver) return lazyObserver;
+  lazyObserver = new IntersectionObserver(
+    (entries) => {
+      for (const en of entries) {
+        if (!en.isIntersecting) continue;
+        const img = en.target as HTMLImageElement;
+        const path = img.dataset.path;
+        if (path) revealed.add(path); // 放行真实 src，触发该卡片 <img> 解码加载
+        lazyObserver!.unobserve(img);
+        lazyWatched.delete(img);
+      }
+    },
+    // rootMargin 600px：进入视口前约 600px 预加载；root 为滚动网格容器
+    { root: gridWrap.value, rootMargin: "600px 0px", threshold: 0 }
+  );
+  return lazyObserver;
+}
+
+// 扫描滚动容器内所有"未放行且未观察"的缩略图并挂载观察（在 DOM 更新后调用）
+function observePendingThumbs() {
+  const wrap = gridWrap.value;
+  if (!wrap) return;
+  const imgs = wrap.querySelectorAll<HTMLImageElement>("img[data-path]");
+  for (const img of imgs) {
+    const path = img.dataset.path;
+    if (!path || revealed.has(path) || lazyWatched.has(img)) continue;
+    getLazyObserver().observe(img);
+    lazyWatched.add(img);
+  }
+}
+
+onUnmounted(() => {
+  lazyObserver?.disconnect();
+  lazyObserver = null;
+  lazyWatched.clear();
+});
 
 function isActive(item: WallpaperItem) {
   if (!store.currentWallpaper || !item.path) return false;
@@ -44,11 +89,13 @@ function onScroll() {
   }
 }
 
-// 渲染后若尚未撑满可视区且还有更多，自动补页直到出现滚动条
+// 渲染后若尚未撑满可视区且还有更多，自动补页直到出现滚动条；
+// 同时把新追加/新渲染的缩略图交给 IO 懒加载
 watch(
   () => store.gridItems.length,
   async () => {
     await nextTick();
+    observePendingThumbs();
     const el = gridWrap.value;
     if (!el) return;
     if (el.scrollHeight <= el.clientHeight && store.hasMore) {
@@ -65,6 +112,26 @@ async function onPickDirectory() {
   } catch (err) {
     message.error(String(err));
   }
+}
+
+// 卡片图源：缩略图就绪且已放行 → 真实缩略图；否则一律 default.jpg 兜底（加载中/失败同图）
+function thumbSrcFor(item: WallpaperItem): string {
+  return item.thumb && revealed.has(item.path || "") ? thumbSrc(item) : defaultJpg;
+}
+
+// 加载失败统一回退默认图（default.jpg 为打包资源，可稳定加载）；
+// dataset.fallback 标记防止默认图自身失败造成无限循环
+const handleImageError = (event: Event) => {
+  const img = event.target as HTMLImageElement;
+  if (img.dataset.fallback === "1") return;
+  img.dataset.fallback = "1";
+  img.src = defaultJpg;
+};
+
+// 加载成功（含切回真实缩略图）后清除回退标记，允许后续失败再次回退
+function onThumbLoad(e: Event) {
+  const img = e.currentTarget as HTMLImageElement;
+  delete img.dataset.fallback;
 }
 </script>
 
@@ -113,6 +180,17 @@ async function onPickDirectory() {
 
     <!-- 网格容器 -->
     <div class="grid-wrap relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-panel/55">
+      <!-- 首次加载 loading 层：allCount 已拉取但 gridItems 尚未渲染时展示 -->
+      <div
+        class="loading-overlay absolute inset-0 z-20 flex flex-col items-center justify-center rounded-xl"
+        :class="store.allCount > 0 && !store.gridItems.length && !store.loadingMore ? 'opacity-100' : 'opacity-0 invisible transition-opacity duration-200'"
+      >
+        <div class="relative h-14 w-14">
+          <div class="absolute inset-0 rounded-full border-4 border-t-accent bg-line/20 outline outline-accent/10 outline-2 outline-offset-4" style="border-radius:inherit"></div>
+          <div class="absolute inset-0 rounded-full border-4 border-b-accent/70 bg-line/10 outline outline-accent/20 outline-2 outline-offset-4" style="border-radius:inherit;animation:spin 1s linear infinite"></div>
+        </div>
+        <span class="mt-4 font-medium text-accent/90 text-xs">正在加载…</span>
+      </div>
       <div
         ref="gridWrap"
         class="grid grid-cols-[repeat(auto-fill,minmax(148px,1fr))] flex-1 gap-2.5 overflow-y-auto p-2.5"
@@ -130,12 +208,17 @@ async function onPickDirectory() {
             @click="onItemClick(item)"
             @contextmenu="onItemContext($event, item)"
           >
-            <div class="thumb-holder min-h-0 w-full flex-1 overflow-hidden bg-elev">
+            <div class="thumb-holder min-h-0 w-full flex-1 overflow-hidden relative">
+              <!-- 缩略图：thumb 就绪且进入视口后赋缩略图 src；未就绪/加载失败均回退 default.jpg -->
               <img
                 class="thumb h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.05]"
-                :src="displaySrc(item)"
+                :src="thumbSrcFor(item)"
+                :data-path="item.path"
                 loading="lazy"
+                decoding="async"
                 :alt="item.title || baseName(item.path || '') || 'wallpaper'"
+                @error="handleImageError"
+                @load="onThumbLoad"
               />
             </div>
             <div class="meta flex min-w-0 items-center gap-1.5 px-2 py-1.5">
@@ -186,3 +269,14 @@ async function onPickDirectory() {
     </div>
   </aside>
 </template>
+
+<style scoped>
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-overlay {
+  background: linear-gradient(135deg, rgba(13,18,28,0.85), rgba(10,14,22,0.92));
+  backdrop-filter: blur(2px);
+}
+</style>

@@ -33,7 +33,8 @@
           "C:/Windows/Web/Wallpaper/**",
           "$HOME/Pictures/**",
           "$PICTURE/**",
-          "$RESOURCE/**"
+          "$RESOURCE/**",
+          "$APPCACHE/thumbnails/**"
         ]
       }
     }

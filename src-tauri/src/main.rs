@@ -4,6 +4,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod thumbs;
 mod wallpaper;
 
 use serde::Serialize;
@@ -36,9 +37,18 @@ fn get_desktop_screen(app: tauri::AppHandle) -> Result<wallpaper::ScreenMeta, St
 }
 
 /// 从本地磁盘永久删除壁纸文件（仅限支持的图片扩展名）
+///
+/// 删除原图成功后同步清理其缩略图缓存；系统壁纸只读约束不变（C:\Windows
+/// 路径会先被后端拦截报错，不会误删对应缩略图）。
 #[tauri::command]
-fn delete_wallpaper(path: String) -> Result<(), String> {
-    wallpaper::delete_wallpaper_file(&path)
+fn delete_wallpaper(path: String, app: tauri::AppHandle) -> Result<(), String> {
+    // 先删除源文件：系统路径 / 不存在 / 不支持类型会在这一步被拒绝
+    wallpaper::delete_wallpaper_file(&path)?;
+    // 源文件删除成功后再清理缩略图缓存（尽力而为）
+    if let Ok(cache) = thumbs::cache_dir(&app) {
+        thumbs::delete_thumb(&path, &cache);
+    }
+    Ok(())
 }
 
 /// 将目录动态加入 asset protocol scope，使前端 convertFileSrc 可预览该目录图片
@@ -72,19 +82,34 @@ fn get_current_wallpaper() -> Result<String, String> {
     wallpaper::get_current_wallpaper_win32()
 }
 
-/// 扫描壁纸目录，返回可用壁纸路径列表（随机顺序由前端处理）
+/// 扫描壁纸目录并生成/复用缩略图，返回列表条目（原图路径 + 缩略图路径）
 ///
 /// `directory` 为可选的自定义壁纸目录；传 Some 时只扫描该目录，留空则用预设目录。
 #[tauri::command]
-fn list_local_wallpapers(directory: Option<String>) -> Result<Vec<String>, String> {
-    wallpaper::scan_local_wallpapers(directory)
+fn list_local_wallpapers(
+    directory: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<Vec<thumbs::WallpaperEntry>, String> {
+    // 自定义目录可能尚未加入 asset scope（此前未设置/未拖入过）；小图跳过
+    // 生成时 thumb 直接使用原图路径，需保证 convertFileSrc 可加载该目录。
+    if let Some(dir) = &directory {
+        let t = dir.trim();
+        if !t.is_empty() {
+            ensure_asset_scope(&app, &PathBuf::from(t));
+        }
+    }
+    let paths = wallpaper::scan_local_wallpapers(directory)?;
+    let cache = thumbs::cache_dir(&app).ok();
+    Ok(thumbs::make_entries(&app, paths, cache.as_deref()))
 }
 
-/// 扫描 Windows 自带系统壁纸目录（C:\Windows\Web\Wallpaper，含子目录），
-/// 仅供"系统壁纸"选项卡只读展示，禁止对返回路径执行删除/写入。
+/// 扫描 Windows 自带系统壁纸目录（C:\Windows\Web\Wallpaper，含子目录）并生成缩略图，
+/// 仅供"系统壁纸"选项卡只读展示（只生成缩略图，不提供删除/写源目录）。
 #[tauri::command]
-fn list_system_wallpapers() -> Result<Vec<String>, String> {
-    wallpaper::scan_system_wallpapers()
+fn list_system_wallpapers(app: tauri::AppHandle) -> Result<Vec<thumbs::WallpaperEntry>, String> {
+    let paths = wallpaper::scan_system_wallpapers()?;
+    let cache = thumbs::cache_dir(&app).ok();
+    Ok(thumbs::make_entries(&app, paths, cache.as_deref()))
 }
 
 /// 弹出系统目录选择框，返回用户选择的目录路径（取消时返回 None）
@@ -175,7 +200,14 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let _ = app;
+            // 启动时即把缩略图缓存目录加入 asset protocol scope，
+            // 保证 WebView 可通过 asset/convertFileSrc 加载缩略图。
+            if let Ok(cache) = thumbs::cache_dir(app.handle()) {
+                if let Err(e) = std::fs::create_dir_all(&cache) {
+                    eprintln!("[warn] 创建缩略图缓存目录失败 {}: {e}", cache.display());
+                }
+                ensure_asset_scope(app.handle(), &cache);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
