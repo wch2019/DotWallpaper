@@ -13,6 +13,19 @@ const emit = defineEmits<{
 const isDragging = ref(false);
 
 let unlisten: (() => void) | null = null;
+const handler = (e: Event) => {
+  if ((e as KeyboardEvent).key === "Escape") {
+    isDragging.value = false;
+  }
+};
+
+// 快捷键：Ctrl + I → 拖放遮罩
+const handlerKey = (e: KeyboardEvent) => {
+  if (e.ctrlKey && e.key.toLowerCase() === "i") {
+    e.preventDefault();
+    isDragging.value = true;
+  }
+};
 
 onMounted(async () => {
   try {
@@ -33,10 +46,14 @@ onMounted(async () => {
   } catch (err) {
     console.error("onDragDropEvent 注册失败", err);
   }
+  window.addEventListener("keydown", handlerKey);
+  window.addEventListener("keydown", handler);
 });
 
 onUnmounted(() => {
   unlisten?.();
+  window.removeEventListener("keydown", handlerKey);
+  window.removeEventListener("keydown", handler);
 });
 </script>
 
@@ -52,6 +69,9 @@ onUnmounted(() => {
         >
           <FolderDown :size="20" :stroke-width="2" />
           松开鼠标，保存到壁纸目录
+          <span class="ml-2 inline-flex items-center gap-1 rounded-md bg-black/15 px-2 py-0.5 text-[11px] text-accent/70">
+            Ctrl + I
+          </span>
         </div>
       </div>
     </Transition>
