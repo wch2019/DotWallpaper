@@ -1,12 +1,15 @@
 {
   "name": "dot-wallpaper",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.0.9",
   "description": "DotWallpaper Tauri entry",
   "scripts": {
     "tauri": "tauri"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"
+  },
+  "dependencies": {
+    "@tauri-apps/plugin-updater": "^2.11.0"
   }
 }

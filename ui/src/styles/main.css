@@ -66,17 +66,17 @@ body {
 
 /* 细滚动条 */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgb(255 255 255 / 0.14);
-  border-radius: 999px;
+  background: rgb(255 255 255 / 0.15);
+  border-radius: 10px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgb(255 255 255 / 0.24);
+  background: rgb(255 255 255 / 0.25);
   background-clip: content-box;
   border: 2px solid transparent;
 }

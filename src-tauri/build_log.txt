@@ -1,2 +1,0 @@
-   Compiling dotwallpaper v0.1.0 (D:\Progect\Marvis\DotWallpaper\src-tauri)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 22.41s

@@ -30,6 +30,12 @@ fn get_wallpaper_style() -> Result<wallpaper::DesktopStyle, String> {
     wallpaper::get_desktop_wallpaper_style()
 }
 
+/// 设置桌面壁纸展示样式（写入注册表并立即刷新桌面生效）
+#[tauri::command]
+fn set_desktop_style(style: u32, tile: bool) -> Result<(), String> {
+    wallpaper::set_desktop_wallpaper_style(style, tile)
+}
+
 /// 获取主屏幕逻辑分辨率与缩放比（用于按真实电脑屏幕比例预览）
 #[tauri::command]
 fn get_desktop_screen(app: tauri::AppHandle) -> Result<wallpaper::ScreenMeta, String> {
@@ -147,13 +153,9 @@ fn copy_dropped_files(paths: &[String], save_dir: &std::path::Path) -> Result<(V
         let Some(name) = src.file_name().map(|n| n.to_string_lossy().to_string()) else {
             continue;
         };
-        let lower = name.to_lowercase();
-        if !(lower.ends_with(".jpg")
-            || lower.ends_with(".jpeg")
-            || lower.ends_with(".png")
-            || lower.ends_with(".webp"))
-        {
-            skipped.push(format!("{name}: 不支持的格式（仅 JPG/PNG/WebP）"));
+        let ext = name.rsplit('.').next().unwrap_or_default();
+        if !wallpaper::is_supported_image_ext(ext) {
+            skipped.push(format!("{name}: 不支持的格式（仅 JPG/PNG/BMP/WebP）"));
             continue;
         }
 
@@ -198,6 +200,7 @@ fn resolve_save_dir(dir: Option<String>) -> PathBuf {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // 启动时即把缩略图缓存目录加入 asset protocol scope，
@@ -219,6 +222,7 @@ fn main() {
             save_dropped_paths,
             delete_wallpaper,
             get_wallpaper_style,
+            set_desktop_style,
             get_desktop_screen
         ])
         .run(tauri::generate_context!())

@@ -1,8 +1,6 @@
 <script setup lang="ts">
 // Sidebar - 左栏：本地壁纸网格（分页加载 / 右键菜单 / 应用当前壁纸）
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
-import { NButton, NIcon, useMessage } from "naive-ui";
-import { FolderOpen } from "lucide-vue-next";
 import defaultJpg from '../assets/images/default.jpg'
 import {
   baseName,
@@ -66,13 +64,20 @@ onUnmounted(() => {
   lazyWatched.clear();
 });
 
-function isActive(item: WallpaperItem) {
-  if (!store.currentWallpaper || !item.path) return false;
-  return item.path === store.currentWallpaper.path;
+// 是否桌面上真正设置的当前壁纸（绿色，已设置到桌面）
+function isCurrent(item: WallpaperItem) {
+  return !!item.path && !!store.currentWallpaper && item.path === store.currentWallpaper.path;
 }
 
+// 是否正在预览/选中（蓝色；当前壁纸绿框优先，两态不叠加显示）
+function isSelected(item: WallpaperItem) {
+  if (isCurrent(item)) return false;
+  return !!item.path && !!store.previewItem && item.path === store.previewItem.path;
+}
+
+// 点击卡片：仅选中并预览，桌面不发生变化
 function onItemClick(item: WallpaperItem) {
-  void store.applyItem(item);
+  store.selectItem(item);
 }
 
 function onItemContext(e: MouseEvent, item: WallpaperItem) {
@@ -103,16 +108,6 @@ watch(
     }
   }
 );
-
-const message = useMessage();
-
-async function onPickDirectory() {
-  try {
-    await store.pickAndApplyDirectory();
-  } catch (err) {
-    message.error(String(err));
-  }
-}
 
 // 卡片图源：缩略图就绪且已放行 → 真实缩略图；否则一律 default.jpg 兜底（加载中/失败同图）
 function thumbSrcFor(item: WallpaperItem): string {
@@ -162,20 +157,10 @@ function onThumbLoad(e: Event) {
         >
           系统
         </button>
-        <span v-if="store.allCount > 0" class="tab-count text-[11px] text-dim">
+      </div>
+      <span v-if="store.allCount > 0" class="tab-count text-[11px] text-dim">
           {{ store.gridItems.length }}/{{ store.allCount }}
         </span>
-      </div>
-
-      <!-- 选择目录仅对本地来源可用；系统壁纸为只读固定目录 -->
-      <div v-if="store.source === 'local'" class="sidebar-actions shrink-0">
-        <NButton size="small" secondary @click="onPickDirectory">
-          <template #icon>
-            <NIcon :component="FolderOpen" />
-          </template>
-          选择目录
-        </NButton>
-      </div>
     </div>
 
     <!-- 网格容器 -->
@@ -202,7 +187,8 @@ function onThumbLoad(e: Event) {
             :key="item.key"
             class="wallpaper-item group relative flex min-h-[150px] cursor-pointer flex-col overflow-hidden rounded-[10px] border border-line bg-panel-2 transition-all duration-200 hover:-translate-y-0.5 hover:border-accent hover:shadow-[0_8px_20px_rgba(0,0,0,0.32)]"
             :class="{
-              'active !border-ok !shadow-[0_0_0_1px_var(--color-ok),0_8px_20px_rgba(0,0,0,0.32)]': isActive(item),
+              'state-current !border-ok !shadow-[0_0_0_1px_var(--color-ok),0_8px_20px_rgba(0,0,0,0.32)]': isCurrent(item),
+              'state-selected !border-accent !shadow-[0_0_0_1px_var(--color-accent),0_8px_20px_rgba(0,0,0,0.32)]': isSelected(item),
               'applying opacity-70': item.applying,
             }"
             @click="onItemClick(item)"
@@ -225,7 +211,13 @@ function onThumbLoad(e: Event) {
               <span class="name truncate text-[11.5px] text-dim">
                 {{ item.title || baseName(item.path || "") || "壁纸" }}
               </span>
-              <span v-if="isActive(item)" class="active-dot ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-ok"></span>
+              <!-- 状态点：绿=当前壁纸(已设置到桌面)，蓝=正在预览(选中) -->
+              <span
+                v-if="isCurrent(item) || isSelected(item)"
+                class="status-dot ml-auto h-1.5 w-1.5 shrink-0 rounded-full"
+                :class="isCurrent(item) ? 'bg-ok' : 'bg-accent'"
+                :title="isCurrent(item) ? '当前壁纸（已设置到桌面）' : '正在预览'"
+              ></span>
             </div>
             <div
               v-if="item.applying"
@@ -242,7 +234,7 @@ function onThumbLoad(e: Event) {
           <p class="empty-sub mt-1 text-[11.5px] text-faint">
             {{
               store.source === "local"
-                ? "点击右上角选择目录"
+                ? "此目录下暂无可用图片，可到设置中更换壁纸目录"
                 : "系统壁纸目录中暂无可用图片"
             }}
           </p>

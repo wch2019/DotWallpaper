@@ -77,6 +77,9 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   const currentDir = ref(""); // 自定义壁纸目录（空 = 预设目录）
   const gridItems = ref<WallpaperItem[]>([]); // 左栏当前列表
   const currentWallpaper = ref<WallpaperItem | null>(null); // 右侧当前壁纸
+  const previewItem = ref<WallpaperItem | null>(null); // 正在预览的壁纸（选中态，非当前桌面）
+  const desktopStyle = ref<{ style: number; tile: boolean } | null>(null); // 桌面壁纸样式
+  const isApplying = ref(false); // 应用壁纸 loading
   const loadingMore = ref(false);
   const allCount = ref(0);
 
@@ -95,6 +98,10 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
   // ---- Getter ----
   const hasMore = computed(() => hasMoreFlag);
+  // 右侧大预览目标：优先"正在预览"，无预览时回退当前桌面壁纸
+  const previewTarget = computed<WallpaperItem | null>(
+    () => previewItem.value ?? currentWallpaper.value
+  );
 
   // ---- 右键菜单 ----
   function openContextMenu(item: WallpaperItem, x: number, y: number) {
@@ -159,44 +166,72 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       : null;
   }
 
-  async function applyItem(item: WallpaperItem): Promise<boolean> {
-    if (item.applying) return false;
-    item.applying = true;
+  // 点击卡片：仅选中/预览，不改动桌面（选中态与当前桌面解耦）
+  function selectItem(item: WallpaperItem) {
+    previewItem.value = item;
+  }
+
+  // 读取系统当前壁纸样式（填充/适应等），供预览与"设为壁纸"使用
+  async function loadDesktopStyle() {
     try {
+      const s = (await invoke("get_wallpaper_style")) as { style: number; tile: boolean };
+      desktopStyle.value = {
+        style: Number(s.style) || 10,
+        tile: Boolean(s.tile),
+      };
+    } catch (err: unknown) {
+      console.error("读取壁纸样式失败:", err);
+      desktopStyle.value = null;
+    }
+  }
+
+  // 将某张壁纸设为桌面壁纸；可选同步应用桌面样式（仅当与系统当前样式不一致时写注册表）
+  async function setItemAsDesktop(
+    item: WallpaperItem,
+    style?: { style: number; tile: boolean }
+  ): Promise<boolean> {
+    if (isApplying.value) return false;
+    const path = item.path || "";
+    if (!path) {
+      toast("壁纸路径无效", "warning");
+      return false;
+    }
+    isApplying.value = true;
+    try {
+      if (
+        style &&
+        desktopStyle.value &&
+        (style.style !== desktopStyle.value.style || style.tile !== desktopStyle.value.tile)
+      ) {
+        await invoke("set_desktop_style", { style: style.style, tile: style.tile });
+        desktopStyle.value = { ...style };
+      }
       const result = await doSetWallpaper(item);
-      toast("壁纸设置成功", "success");
       currentWallpaper.value = {
         key: "current_" + (result.path || ""),
         kind: "local",
         path: result.path,
       };
+      toast("壁纸设置成功", "success");
       return true;
     } catch (err: unknown) {
       toast("设置失败：" + ((err as Error)?.message || String(err)), "error");
       return false;
     } finally {
-      item.applying = false;
+      isApplying.value = false;
     }
   }
 
-  // 将右侧当前壁纸设为桌面（Ctrl+S / 按钮）
-  async function setCurrentAsDesktop() {
-    if (!currentWallpaper.value) {
-      toast("当前无壁纸", "warning");
-      return;
+  // 将右侧正在预览（无预览时为当前桌面）的壁纸设为桌面（Ctrl+S / 设为壁纸按钮）
+  async function applyPreviewAsDesktop(
+    style?: { style: number; tile: boolean }
+  ): Promise<boolean> {
+    const target = previewTarget.value;
+    if (!target || !target.path) {
+      toast("当前无可预览壁纸", "warning");
+      return false;
     }
-    const cur = currentWallpaper.value;
-    try {
-      const result = (await invoke("set_wallpaper", {
-        path: cur.path || "",
-        dir: resolveDirArg(),
-      })) as { path: string } | string;
-      const path = typeof result === "string" ? result : result.path;
-      currentWallpaper.value = { key: "current_" + path, kind: "local", path };
-      toast("已设置为当前壁纸 (Ctrl+S)", "success");
-    } catch (err: unknown) {
-      toast("设置失败：" + ((err as Error)?.message || String(err)), "error");
-    }
+    return setItemAsDesktop(target, style);
   }
 
   // ---- 壁纸源加载（分页） ----
@@ -321,21 +356,8 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     if (!item) return;
 
     if (action === "set-wallpaper") {
-      if (item.kind === "current") {
-        try {
-          const result = (await invoke("set_wallpaper", {
-            path: item.path || "",
-            dir: resolveDirArg(),
-          })) as { path: string } | string;
-          const path = typeof result === "string" ? result : result.path;
-          currentWallpaper.value = { key: "current_" + path, kind: "local", path };
-          toast("已重新设置当前壁纸", "success");
-        } catch (err: unknown) {
-          toast("设置失败：" + ((err as Error)?.message || String(err)), "error");
-        }
-        return;
-      }
-      await applyItem(item);
+      // 设置桌面不改变"正在预览"的选中态：蓝（预览）与绿（桌面）独立
+      await setItemAsDesktop(item);
       return;
     }
 
@@ -364,9 +386,13 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       await invoke("delete_wallpaper", { path: item.path });
       toast("已删除壁纸：" + name, "success");
       await loadWallpapers();
-      // 若删除的正是当前桌面壁纸，同步刷新右侧预览
+      // 删除的正是当前桌面壁纸：同步刷新桌面真值
       if (currentWallpaper.value?.path === item.path) {
         await loadCurrentWallpaper();
+      }
+      // 删除的正是正在预览的壁纸：清空选中态，大预览回退到当前桌面
+      if (previewItem.value?.path === item.path) {
+        previewItem.value = null;
       }
     } catch (err: unknown) {
       toast("删除失败：" + ((err as Error)?.message || String(err)), "error");
@@ -379,6 +405,9 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     currentDir,
     gridItems,
     currentWallpaper,
+    previewItem,
+    desktopStyle,
+    isApplying,
     loadingMore,
     allCount,
     ctxVisible,
@@ -388,12 +417,15 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     ctxReadOnly,
     // getters
     hasMore,
+    previewTarget,
     // actions
     setSource,
     openContextMenu,
     closeContextMenu,
-    applyItem,
-    setCurrentAsDesktop,
+    selectItem,
+    setItemAsDesktop,
+    applyPreviewAsDesktop,
+    loadDesktopStyle,
     loadWallpapers,
     loadMore,
     loadCurrentWallpaper,

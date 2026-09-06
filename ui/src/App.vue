@@ -15,8 +15,10 @@ import ContextMenu from "./components/ContextMenu.vue";
 import DropZone from "./components/DropZone.vue";
 import NaiveBridge from "./components/NaiveBridge.vue";
 import { useWallpaperStore } from "./stores/wallpaper";
+import { useUpdaterStore } from '@/stores/updater'
 
 const store = useWallpaperStore();
+const updaterStore = useUpdaterStore();
 const appWindow = getCurrentWindow();
 
 // Naive UI 主题令牌：与 main.css 设计令牌对齐（冰蓝主色、圆角）
@@ -35,6 +37,39 @@ const themeOverrides: GlobalThemeOverrides = {
   },
   Message: {
     borderRadius: "10px",
+  },
+  // 下拉选择器：触发器/下拉菜单与 main.css 面板色对齐，选中态用冰蓝
+  Select: {
+    peers: {
+      InternalSelection: {
+        color: "#171e2e",
+        colorActive: "#171e2e",
+        border: "1px solid rgba(255, 255, 255, 0.07)",
+        borderHover: "1px solid rgba(127, 168, 255, 0.6)",
+        borderActive: "1px solid rgba(127, 168, 255, 0.9)",
+        borderFocus: "1px solid rgba(127, 168, 255, 0.9)",
+        boxShadowActive: "0 0 0 2px rgba(127, 168, 255, 0.18)",
+        boxShadowFocus: "0 0 0 2px rgba(127, 168, 255, 0.18)",
+        textColor: "#9aa6ba",
+        placeholderColor: "#5f6c82",
+        caretColor: "#7fa8ff",
+        arrowColor: "#5f6c82",
+        borderRadius: "8px",
+        heightSmall: "28px",
+      },
+      InternalSelectMenu: {
+        color: "#1e2739",
+        borderRadius: "8px",
+        optionTextColor: "#9aa6ba",
+        optionTextColorActive: "#7fa8ff",
+        optionTextColorPressed: "#e7ebf3",
+        optionColorPending: "rgba(127, 168, 255, 0.16)",
+        optionColorActive: "rgba(127, 168, 255, 0.1)",
+        optionColorActivePending: "rgba(127, 168, 255, 0.2)",
+        optionCheckColor: "#7fa8ff",
+        groupHeaderTextColor: "#5f6c82",
+      },
+    },
   },
 };
 
@@ -63,10 +98,10 @@ async function onDropFiles(paths: string[]) {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  // Ctrl+S = 设置为当前壁纸
+  // Ctrl+S = 将正在预览的壁纸设为桌面壁纸
   if (e.ctrlKey && e.key.toLowerCase() === "s") {
     e.preventDefault();
-    void store.setCurrentAsDesktop();
+    void store.applyPreviewAsDesktop();
   }
   // Ctrl+R = 重新加载壁纸列表
   if (e.ctrlKey && e.key.toLowerCase() === "r") {
@@ -85,10 +120,14 @@ onMounted(() => {
   // 统一在父组件初始化：先恢复目录记忆，再加载数据
   store.restoreDir();
   void store.loadCurrentWallpaper();
+  void store.loadDesktopStyle();
   void store.loadWallpapers();
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("mousedown", onGlobalMouseDown);
   window.addEventListener("blur", store.closeContextMenu);
+  setTimeout(() => {
+    updaterStore.checkUpdate()
+  }, 3000)
 });
 </script>
 

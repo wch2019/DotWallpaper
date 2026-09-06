@@ -5,17 +5,23 @@
 use std::ffi::c_void;
 use std::path::PathBuf;
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::WIN32_ERROR;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_SZ,
-    REG_VALUE_TYPE,
+    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+    KEY_READ, KEY_SET_VALUE, REG_SZ, REG_VALUE_TYPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, SPI_GETDESKWALLPAPER, SPI_SETDESKWALLPAPER,
     SPIF_SENDCHANGE, SPIF_UPDATEINIFILE,
 };
 
-/// 支持的壁纸图片扩展名
-const SUPPORTED_EXTS: [&str; 4] = ["jpg", "jpeg", "png", "bmp"];
+/// 支持的壁纸图片扩展名（列表扫描 / 拖入导入 / 删除共用同一权威列表）
+const SUPPORTED_EXTS: [&str; 5] = ["jpg", "jpeg", "png", "bmp", "webp"];
+
+/// 是否受支持的壁纸图片扩展名（大小写不敏感）
+pub fn is_supported_image_ext(ext: &str) -> bool {
+    SUPPORTED_EXTS.iter().any(|s| s.eq_ignore_ascii_case(ext))
+}
 
 /// Windows 自带系统壁纸目录（只读展示，禁止删除/写入）
 const SYSTEM_WALLPAPER_DIR: &str = r"C:\Windows\Web\Wallpaper";
@@ -80,8 +86,9 @@ pub fn get_current_wallpaper_win32() -> Result<String, String> {
     Ok(path)
 }
 
-/// 扫描壁纸目录，返回壁纸文件路径列表（上限 200，防止用户图片文件夹过大）。
+/// 扫描壁纸目录，返回全部壁纸文件路径列表。
 ///
+/// 不设硬性条数上限：大批量图片由前端分页 + 缩略图后台渐进生成承载。
 /// 传入 `custom_dir`（Some 且非空）时只扫描该目录；否则使用预设目录。
 pub fn scan_local_wallpapers(custom_dir: Option<String>) -> Result<Vec<String>, String> {
     let mut results: Vec<String> = Vec::new();
@@ -97,9 +104,6 @@ pub fn scan_local_wallpapers(custom_dir: Option<String>) -> Result<Vec<String>, 
             }
             if let Ok(entries) = walk_dir(&dir) {
                 for path in entries {
-                    if results.len() >= 200 {
-                        break;
-                    }
                     let normalized = path.replace('/', "\\");
                     if seen.insert(normalized.clone()) {
                         results.push(normalized);
@@ -116,9 +120,6 @@ pub fn scan_local_wallpapers(custom_dir: Option<String>) -> Result<Vec<String>, 
         }
         if let Ok(entries) = walk_dir(&dir) {
             for path in entries {
-                if results.len() >= 200 {
-                    break;
-                }
                 let normalized = path.replace('/', "\\");
                 if seen.insert(normalized.clone()) {
                     results.push(normalized);
@@ -142,9 +143,6 @@ pub fn scan_system_wallpapers() -> Result<Vec<String>, String> {
     let mut results: Vec<String> = Vec::new();
     if let Ok(entries) = walk_dir(&dir) {
         for path in entries {
-            if results.len() >= 200 {
-                break;
-            }
             results.push(path.replace('/', "\\"));
         }
     }
@@ -166,7 +164,7 @@ fn is_under_windows_dir(path: &std::path::Path) -> bool {
     s.starts_with("c:\\windows") || s.starts_with("c:\\windows\\")
 }
 
-/// 递归遍历目录，收集支持的图片文件（最多 200 个）
+/// 递归遍历目录，收集全部支持的图片文件
 fn walk_dir(dir: &PathBuf) -> std::io::Result<Vec<String>> {
     let mut found: Vec<String> = Vec::new();
     let mut stack = vec![dir.clone()];
@@ -184,18 +182,12 @@ fn walk_dir(dir: &PathBuf) -> std::io::Result<Vec<String>> {
                 continue;
             }
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if SUPPORTED_EXTS.iter().any(|s| s.eq_ignore_ascii_case(ext)) {
+                if is_supported_image_ext(ext) {
                     if let Some(p) = path.to_str() {
                         found.push(p.to_string());
                     }
                 }
             }
-            if found.len() >= 200 {
-                break;
-            }
-        }
-        if found.len() >= 200 {
-            break;
         }
     }
 
@@ -222,6 +214,71 @@ pub fn get_desktop_wallpaper_style() -> Result<DesktopStyle, String> {
     Ok(DesktopStyle { style, tile })
 }
 
+/// 设置桌面壁纸展示样式（写入 HKCU\Control Panel\Desktop 并立即刷新桌面生效）
+///
+/// - `style`：Windows WallpaperStyle 值（0=居中 6=适应 10=填充 22=拉伸）
+/// - `tile`：是否平铺（TileWallpaper=1，平铺优先于 style）
+pub fn set_desktop_wallpaper_style(style: u32, tile: bool) -> Result<(), String> {
+    if !matches!(style, 0 | 6 | 10 | 22) {
+        return Err("不支持的壁纸样式".into());
+    }
+    let sub_wide: Vec<u16> = r"Control Panel\Desktop"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        let mut key: HKEY = HKEY(std::ptr::null_mut());
+        let open = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(sub_wide.as_ptr()),
+            0,
+            KEY_READ | KEY_SET_VALUE,
+            &mut key,
+        );
+        if open != WIN32_ERROR(0) {
+            return Err(format!("打开桌面设置注册表失败: {}", open.0));
+        }
+        let r1 = set_reg_str(key, "WallpaperStyle", &style.to_string());
+        let r2 = set_reg_str(key, "TileWallpaper", if tile { "1" } else { "0" });
+        let _ = RegCloseKey(key);
+        r1?;
+        r2?;
+    }
+    // 重新应用当前壁纸，让新样式立即生效
+    if let Ok(cur) = get_current_wallpaper_win32() {
+        if !cur.is_empty() {
+            let _ = set_wallpaper_win32(&cur);
+        }
+    }
+    Ok(())
+}
+
+/// 写入注册表 REG_SZ 字符串值（值以 NUL 结尾）
+fn set_reg_str(key: HKEY, name: &str, value: &str) -> Result<(), String> {
+    let name_wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let value_wide: Vec<u16> = value.encode_utf16().chain(Some(0)).collect();
+    // REG_SZ 数据以字节切片传入（windows crate 按切片长度自动计算 cbData）
+    let data: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            value_wide.as_ptr() as *const u8,
+            value_wide.len() * 2,
+        )
+    };
+    unsafe {
+        let rc = RegSetValueExW(
+            key,
+            PCWSTR(name_wide.as_ptr()),
+            0,
+            REG_SZ,
+            Some(data),
+        );
+        if rc != WIN32_ERROR(0) {
+            return Err(format!("写入注册表 {name} 失败: {}", rc.0));
+        }
+    }
+    Ok(())
+}
+
 /// 读取注册表 REG_SZ 字符串值
 fn reg_str_value(subkey: &str, value: &str) -> Option<String> {
     let sub_wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
@@ -236,7 +293,7 @@ fn reg_str_value(subkey: &str, value: &str) -> Option<String> {
             KEY_READ,
             &mut key,
         );
-        if open.is_err() {
+        if open != WIN32_ERROR(0) {
             return None;
         }
 
@@ -253,7 +310,7 @@ fn reg_str_value(subkey: &str, value: &str) -> Option<String> {
         );
         let _ = RegCloseKey(key);
 
-        if query.is_err() || typ != REG_SZ {
+        if query != WIN32_ERROR(0) || typ != REG_SZ {
             return None;
         }
         let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
@@ -314,12 +371,7 @@ pub fn delete_wallpaper_file(path: &str) -> Result<(), String> {
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
-    let allowed: Vec<String> = SUPPORTED_EXTS
-        .iter()
-        .map(|s| s.to_string())
-        .chain(std::iter::once("webp".to_string()))
-        .collect();
-    if !allowed.iter().any(|s| s.eq_ignore_ascii_case(&ext)) {
+    if !is_supported_image_ext(&ext) {
         return Err("不支持的壁纸文件类型".into());
     }
 

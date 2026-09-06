@@ -11,6 +11,7 @@
     "core:window:allow-current-monitor",
     "core:window:allow-close",
     "core:window:allow-is-minimized",
-    "dialog:default"
+    "dialog:default",
+    "updater:default"
   ]
 }
