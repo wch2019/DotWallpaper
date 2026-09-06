@@ -26,26 +26,43 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ui/package-lock.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # 对应你本地的：cd ui && npm install
       - name: Install frontend dependencies
-        run: npm install
+        run: npm ci
         working-directory: ui
 
-      - name: Build Tauri App
+      # 对应你本地最终执行 npm run tauri build
+      # Tauri CLI 在根目录，所以必须安装根目录依赖
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Build and Release
         uses: tauri-apps/tauri-action@v0
+
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'DotWallpaper ${{ github.ref_name }}'
+
           releaseBody: |
-            See the assets below for downloads.
+            DotWallpaper ${{ github.ref_name }}
+
           releaseDraft: false
           prerelease: false
+
+          # 你的 Tauri 项目在根目录，不是 ui
           projectPath: .
