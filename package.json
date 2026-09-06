@@ -1,7 +1,7 @@
 {
   "name": "dot-wallpaper",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DotWallpaper Tauri entry",
   "scripts": {
     "tauri": "tauri"
