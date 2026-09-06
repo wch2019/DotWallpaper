@@ -49,6 +49,11 @@ export const useUpdaterStore = defineStore('updater', () => {
     const error = ref<unknown>(null)
 
     /**
+     * 更新弹窗是否可见（TitleBar 按钮与关于页检查共用同一弹窗）
+     */
+    const dialogVisible = ref(false)
+
+    /**
      * 是否有新版本
      */
     const hasUpdate = computed(() => {
@@ -151,6 +156,9 @@ export const useUpdaterStore = defineStore('updater', () => {
                 }
             )
 
+            // 下载完成后安装流程接管（应用通常会自动重启），先收起弹窗
+            closeUpdateDialog()
+
             return true
         } catch (err) {
             console.error('[Updater] 下载更新失败:', err)
@@ -161,6 +169,24 @@ export const useUpdaterStore = defineStore('updater', () => {
         } finally {
             downloading.value = false
         }
+    }
+
+    /**
+     * 打开更新弹窗
+     */
+    function openUpdateDialog() {
+        dialogVisible.value = true
+    }
+
+    /**
+     * 关闭更新弹窗
+     */
+    function closeUpdateDialog() {
+        // 下载中不允许关闭弹窗（安装过程即将接管界面）
+        if (downloading.value) {
+            return
+        }
+        dialogVisible.value = false
     }
 
     /**
@@ -178,6 +204,7 @@ export const useUpdaterStore = defineStore('updater', () => {
 
         checked.value = false
         error.value = null
+        dialogVisible.value = false
     }
 
     /**
@@ -205,6 +232,11 @@ export const useUpdaterStore = defineStore('updater', () => {
         currentVersion,
         updateDate,
         updateNotes,
+
+        // 弹窗显隐
+        dialogVisible,
+        openUpdateDialog,
+        closeUpdateDialog,
 
         // 方法
         checkUpdate,

@@ -3,12 +3,16 @@ import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import { fileURLToPath } from "url";
+import packageJson from './package.json'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // DotWallpaper UI - Vue 3 + Vite 5（独立于根目录的 Tauri 前端工程）
 // devUrl 固定端口 1420，与 src-tauri/tauri.conf.json 保持一致
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(packageJson.version)
+  },
   plugins: [vue(), tailwindcss()],
   resolve: {
     alias: {

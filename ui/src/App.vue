@@ -14,6 +14,7 @@ import CurrentPanel from "./components/CurrentPanel.vue";
 import ContextMenu from "./components/ContextMenu.vue";
 import DropZone from "./components/DropZone.vue";
 import NaiveBridge from "./components/NaiveBridge.vue";
+import UpdateDialog from "./components/UpdateDialog.vue";
 import { useWallpaperStore } from "./stores/wallpaper";
 import { useUpdaterStore } from '@/stores/updater'
 
@@ -159,6 +160,9 @@ onMounted(() => {
             <!-- 全局文件拖放接收 -->
             <DropZone @drop-files="onDropFiles" />
           </div>
+
+          <!-- 全局更新弹窗（TitleBar / 关于页共用） -->
+          <UpdateDialog />
         </NaiveBridge>
       </n-dialog-provider>
     </n-message-provider>

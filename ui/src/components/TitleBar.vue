@@ -3,10 +3,12 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Images, Minus, Square, X, RefreshCw } from "lucide-vue-next";
 import SettingsCenter from "./SettingsCenter/SettingsCenter.vue";
+import { useUpdaterStore } from "@/stores/updater";
 import dotCode from "@/assets/dotCode.png";
 import { ref } from "vue";
 
 const appWindow = getCurrentWindow();
+const updaterStore = useUpdaterStore();
 
 async function toggleMinimize() {
   const minimized = await appWindow.isMinimized();
@@ -46,6 +48,16 @@ function onTitlebarDblclick(e: MouseEvent) {
 
     <div class="titlebar-right flex items-center">
       <div class="window-controls app-no-drag flex items-center gap-1">
+        <!-- 更新按钮：仅在发现新版本时显示（预留 .update-badge 样式） -->
+        <button
+          v-if="updaterStore.hasUpdate"
+          class="update-badge"
+          :title="'发现新版本 v' + updaterStore.latestVersion + '，点击查看更新'"
+          @click="updaterStore.openUpdateDialog()"
+        >
+          <RefreshCw :size="13" :stroke-width="2" />
+          <span class="dot"></span>
+        </button>
         <!-- 设置中心 -->
         <SettingsCenter />
         <span class="divider mx-1 h-3.5 w-px shrink-0 bg-line"></span>
@@ -78,7 +90,11 @@ function onTitlebarDblclick(e: MouseEvent) {
 <style scoped>
 .update-badge {
   position: relative;
-  padding: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
   border-radius: 6px;
   color: var(--color-accent);
   cursor: pointer;
@@ -89,12 +105,13 @@ function onTitlebarDblclick(e: MouseEvent) {
 }
 .update-badge .dot {
   position: absolute;
-  top: 4px;
-  right: 4px;
+  top: 3px;
+  right: 3px;
   width: 6px;
   height: 6px;
   background: var(--color-danger);
   border-radius: 50%;
+  pointer-events: none;
   animation: pulse 1.5s infinite;
 }
 @keyframes pulse {

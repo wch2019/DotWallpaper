@@ -24,7 +24,7 @@ const NAV_ITEMS: { key: TabKey; label: string; icon: any }[] = [
 ];
 
 const appName = "DotWallpaper";
-const appVersion = "0.1.0";
+const appVersion = __APP_VERSION__;
 
 function onNav(key: TabKey) {
   activeTab.value = key;
