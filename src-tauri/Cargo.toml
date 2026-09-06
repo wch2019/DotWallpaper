@@ -1,6 +1,6 @@
 [package]
 name = "dotwallpaper"
-version = "0.0.9"
+version = "0.1.0"
 description = "DotWallpaper 壁纸工具"
 edition = "2021"
 

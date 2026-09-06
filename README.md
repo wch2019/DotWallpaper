@@ -90,6 +90,8 @@ npm run tauri dev
 ### 构建发布版
 
 ```bash
+$env:TAURI_SIGNING_PRIVATE_KEY="Path or content of your private key"
+
 npm run tauri build
 ```
 
