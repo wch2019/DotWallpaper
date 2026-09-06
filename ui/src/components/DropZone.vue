@@ -68,7 +68,7 @@ onUnmounted(() => {
           class="drag-overlay-inner flex items-center gap-2.5 rounded-2xl border border-accent/40 bg-accent-soft px-6 py-4 text-[14px] font-medium text-accent shadow-[0_16px_44px_rgba(0,0,0,0.42)]"
         >
           <FolderDown :size="20" :stroke-width="2" />
-          松开鼠标，保存到壁纸目录
+          拖入松开鼠标，保存到壁纸目录
           <span class="ml-2 inline-flex items-center gap-1 rounded-md bg-black/15 px-2 py-0.5 text-[11px] text-accent/70">
             Ctrl + I
           </span>

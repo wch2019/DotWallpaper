@@ -59,8 +59,15 @@ jobs:
           releaseName: 'DotWallpaper ${{ github.ref_name }}'
 
           releaseBody: |
+            ### ✨ 新增
+            - 无
+  
+            ### 🐛 修复
+            - 修复暂无壁纸提示
+            
             ### 🎨 优化 
-            - 优化页面
+            - 优化设置页面
+            - 优化拖入图片遮罩文字
 
           releaseDraft: false
           prerelease: false

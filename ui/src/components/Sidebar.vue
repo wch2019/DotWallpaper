@@ -229,27 +229,14 @@ function onThumbLoad(e: Event) {
         </template>
 
         <!-- 空态 -->
-        <div v-if="store.source === 'local'" class="empty col-span-full flex flex-col items-center justify-center py-16 text-center">
-          <div v-if="store.allCount > 0" class="flex flex-col items-center">
-            <p class="text-[13px] text-dim">暂无壁纸</p>
-            <p class="empty-sub mt-1 text-[11.5px] text-faint">
-              此目录下暂无可用图片，可到设置中更换壁纸目录
-            </p>
-          </div>
-          <div v-else class="drop-hint flex flex-col items-center gap-2.5">
-            <div class="drop-ring flex h-28 w-28 items-center justify-center rounded-full border-2 border-dashed border-accent/40 bg-accent-soft/40">
-              <svg class="h-12 w-12 text-accent/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.4">
-                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </div>
-            <p class="text-[13.5px] font-medium text-tx">拖放图片到此</p>
-            <p class="empty-sub mt-0 text-[11px] text-faint">支持 JPG / PNG / WEBP / BMP，保存到壁纸目录</p>
-          </div>
-        </div>
         <div v-else class="empty col-span-full flex flex-col items-center justify-center py-16 text-center">
           <p class="text-[13px] text-dim">暂无壁纸</p>
           <p class="empty-sub mt-1 text-[11.5px] text-faint">
-            系统壁纸目录中暂无可用图片
+            {{
+              store.source === "local"
+                  ? "此目录下暂无可用图片，可到设置中更换壁纸目录"
+                  : "系统壁纸目录中暂无可用图片"
+            }}
           </p>
         </div>
 
