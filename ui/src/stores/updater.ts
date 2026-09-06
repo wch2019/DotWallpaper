@@ -144,7 +144,7 @@ export const useUpdaterStore = defineStore('updater', () => {
         try {
             await downloadAndInstallUpdate(
                 update.value,
-                (data: any) => {
+                (data) => {
                     downloaded.value = data.downloaded
                     total.value = data.total
                     progress.value = data.percent
