@@ -363,13 +363,8 @@ watch(zoomVisible, (v) => {
   else window.removeEventListener("keydown", onZoomKey);
 });
 
-// zoom 浮层背景同样按壁纸样式渲染，形成"全屏预览"观感
-const zoomBg = computed(() =>
-  styleToBg(
-    { style: selectedStyle.value.style, tile: selectedStyle.value.tile },
-    previewSrc.value
-  )
-);
+// zoom 浮层背景改由模板内 .zoom-bg 层承载（复用 getTransitionBg 淡入淡出，
+// 使放大态左右切换与普通预览保持一致）
 
 // ---------- 设为壁纸 ----------
 function onApplyAsDesktop() {
@@ -514,16 +509,32 @@ onUnmounted(() => {
       <div
         v-if="zoomVisible"
         class="zoom-overlay fixed inset-0 z-[999] overflow-hidden"
-        :style="zoomBg"
         @click.self="closeZoom"
       >
-        <div class="zoom-mask absolute inset-0 bg-black/30"></div>
+        <!-- 壁纸背景层：独立承载背景图，切换时通过 animOpacity 淡入淡出 -->
+        <div class="zoom-bg" :style="getTransitionBg(selectedStyle, previewSrc)"></div>
+        <div class="zoom-mask pointer-events-none absolute inset-0 bg-black/30"></div>
         <button
           class="zoom-close absolute right-4 top-4 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/50 text-white/90 transition-colors hover:bg-black/70"
           title="关闭（Esc）"
           @click="closeZoom"
         >
           <NIcon :component="X" :size="18" />
+        </button>
+        <!-- 放大态左右切换（复用快速切换的淡入淡出） -->
+        <button
+          class="zoom-switch zoom-switch-left"
+          title="上一张 (←)"
+          @click="quickSwitch('left')"
+        >
+          <NIcon :component="ChevronLeft" :size="26" />
+        </button>
+        <button
+          class="zoom-switch zoom-switch-right"
+          title="下一张 (→)"
+          @click="quickSwitch('right')"
+        >
+          <NIcon :component="ChevronRight" :size="26" />
         </button>
         <!-- 底部信息条 -->
         <div class="zoom-info absolute bottom-6 left-1/2 z-10 flex max-w-[80%] -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-full border border-white/10 bg-black/55 px-4 py-1.5 text-[12px] text-white/90 backdrop-blur">
@@ -675,8 +686,52 @@ onUnmounted(() => {
   cursor: pointer;
 }
 .zoom-overlay {
-  background-position: center center;
+  background: #05070c; /* 兜底底色：切换淡出时不透出下层应用 */
   animation: zoom-fade-in 0.18s ease;
+}
+/* 放大态壁纸背景层：独立承载背景图，opacity 过渡即左右切换淡入淡出 */
+.zoom-bg {
+  position: absolute;
+  inset: 0;
+  background-position: center center;
+  transition: opacity 0.28s ease;
+}
+/* 放大态左右切换按钮 */
+.zoom-switch {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 10;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(15, 20, 30, 0.55);
+  backdrop-filter: blur(8px);
+  color: rgba(255, 255, 255, 0.9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.2s ease, background 0.2s ease;
+  user-select: none;
+}
+.zoom-overlay:hover .zoom-switch {
+  opacity: 1;
+}
+.zoom-switch:hover {
+  background: rgba(25, 30, 45, 0.8);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+.zoom-switch:active {
+  transform: translateY(-50%) scale(0.92);
+}
+.zoom-switch-left {
+  left: 18px;
+}
+.zoom-switch-right {
+  right: 18px;
 }
 @keyframes zoom-fade-in {
   from { opacity: 0; }
