@@ -244,12 +244,11 @@ pub fn set_desktop_wallpaper_style(style: u32, tile: bool) -> Result<(), String>
         r1?;
         r2?;
     }
-    // 重新应用当前壁纸，让新样式立即生效
-    if let Ok(cur) = get_current_wallpaper_win32() {
-        if !cur.is_empty() {
-            let _ = set_wallpaper_win32(&cur);
-        }
-    }
+    // 注意：此处不再重新应用当前壁纸。
+    // 调用方（设为壁纸流程）写入样式后总会紧跟设置新壁纸，一次
+    // SystemParametersInfoW(SPI_SETDESKWALLPAPER) 即按新样式生效；
+    // 若在函数内先重应用旧壁纸，会多一次 SPI_SENDCHANGE 同步广播，
+    // 主线程需等待 explorer 应用完才返回，曾导致窗口长时间无响应。
     Ok(())
 }
 

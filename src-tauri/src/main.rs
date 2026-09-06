@@ -26,14 +26,18 @@ struct SaveDroppedPathsResult {
 
 /// 获取当前桌面壁纸展示样式（用于按真实电脑效果预览）
 #[tauri::command]
-fn get_wallpaper_style() -> Result<wallpaper::DesktopStyle, String> {
-    wallpaper::get_desktop_wallpaper_style()
+async fn get_wallpaper_style() -> Result<wallpaper::DesktopStyle, String> {
+    tauri::async_runtime::spawn_blocking(wallpaper::get_desktop_wallpaper_style)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// 设置桌面壁纸展示样式（写入注册表并立即刷新桌面生效）
 #[tauri::command]
-fn set_desktop_style(style: u32, tile: bool) -> Result<(), String> {
-    wallpaper::set_desktop_wallpaper_style(style, tile)
+async fn set_desktop_style(style: u32, tile: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || wallpaper::set_desktop_wallpaper_style(style, tile))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// 获取主屏幕逻辑分辨率与缩放比（用于按真实电脑屏幕比例预览）
@@ -47,14 +51,18 @@ fn get_desktop_screen(app: tauri::AppHandle) -> Result<wallpaper::ScreenMeta, St
 /// 删除原图成功后同步清理其缩略图缓存；系统壁纸只读约束不变（C:\Windows
 /// 路径会先被后端拦截报错，不会误删对应缩略图）。
 #[tauri::command]
-fn delete_wallpaper(path: String, app: tauri::AppHandle) -> Result<(), String> {
-    // 先删除源文件：系统路径 / 不存在 / 不支持类型会在这一步被拒绝
-    wallpaper::delete_wallpaper_file(&path)?;
-    // 源文件删除成功后再清理缩略图缓存（尽力而为）
-    if let Ok(cache) = thumbs::cache_dir(&app) {
-        thumbs::delete_thumb(&path, &cache);
-    }
-    Ok(())
+async fn delete_wallpaper(path: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        // 先删除源文件：系统路径 / 不存在 / 不支持类型会在这一步被拒绝
+        wallpaper::delete_wallpaper_file(&path)?;
+        // 源文件删除成功后再清理缩略图缓存（尽力而为）
+        if let Ok(cache) = thumbs::cache_dir(&app) {
+            thumbs::delete_thumb(&path, &cache);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 将目录动态加入 asset protocol scope，使前端 convertFileSrc 可预览该目录图片
@@ -69,7 +77,7 @@ fn ensure_asset_scope(app: &tauri::AppHandle, dir: &PathBuf) {
 /// `path` 必须为本地文件系统路径。
 /// `dir` 可选：拖入图片下载保存的目标目录；为空时使用默认图片目录。
 #[tauri::command]
-fn set_wallpaper(
+async fn set_wallpaper(
     path: String,
     dir: Option<String>,
     app: tauri::AppHandle,
@@ -77,22 +85,30 @@ fn set_wallpaper(
     let save_dir = resolve_save_dir(dir);
     ensure_asset_scope(&app, &save_dir);
 
-    // 本地文件路径：直接设置
-    wallpaper::set_wallpaper_win32(&path)?;
+    // SystemParametersInfoW(SPI_SETDESKWALLPAPER) 为同步系统广播，会等待
+    // explorer 完成壁纸应用才返回；放入 blocking 线程避免卡死窗口主线程。
+    let set_path = path.clone();
+    let res: Result<(), String> =
+        tauri::async_runtime::spawn_blocking(move || wallpaper::set_wallpaper_win32(&set_path))
+            .await
+            .map_err(|e| e.to_string())?;
+    res?;
     Ok(SetWallpaperResult { path })
 }
 
 /// 获取当前桌面壁纸路径
 #[tauri::command]
-fn get_current_wallpaper() -> Result<String, String> {
-    wallpaper::get_current_wallpaper_win32()
+async fn get_current_wallpaper() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(wallpaper::get_current_wallpaper_win32)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// 扫描壁纸目录并生成/复用缩略图，返回列表条目（原图路径 + 缩略图路径）
 ///
 /// `directory` 为可选的自定义壁纸目录；传 Some 时只扫描该目录，留空则用预设目录。
 #[tauri::command]
-fn list_local_wallpapers(
+async fn list_local_wallpapers(
     directory: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<Vec<thumbs::WallpaperEntry>, String> {
@@ -104,18 +120,27 @@ fn list_local_wallpapers(
             ensure_asset_scope(&app, &PathBuf::from(t));
         }
     }
-    let paths = wallpaper::scan_local_wallpapers(directory)?;
+    // 目录扫描 + 缩略图缓存检测为磁盘 IO，放入 blocking 线程避免卡住主线程。
     let cache = thumbs::cache_dir(&app).ok();
-    Ok(thumbs::make_entries(&app, paths, cache.as_deref()))
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<thumbs::WallpaperEntry>, String> {
+        let paths = wallpaper::scan_local_wallpapers(directory)?;
+        Ok(thumbs::make_entries(&app, paths, cache.as_deref()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 扫描 Windows 自带系统壁纸目录（C:\Windows\Web\Wallpaper，含子目录）并生成缩略图，
 /// 仅供"系统壁纸"选项卡只读展示（只生成缩略图，不提供删除/写源目录）。
 #[tauri::command]
-fn list_system_wallpapers(app: tauri::AppHandle) -> Result<Vec<thumbs::WallpaperEntry>, String> {
-    let paths = wallpaper::scan_system_wallpapers()?;
+async fn list_system_wallpapers(app: tauri::AppHandle) -> Result<Vec<thumbs::WallpaperEntry>, String> {
     let cache = thumbs::cache_dir(&app).ok();
-    Ok(thumbs::make_entries(&app, paths, cache.as_deref()))
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<thumbs::WallpaperEntry>, String> {
+        let paths = wallpaper::scan_system_wallpapers()?;
+        Ok(thumbs::make_entries(&app, paths, cache.as_deref()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 弹出系统目录选择框，返回用户选择的目录路径（取消时返回 None）
