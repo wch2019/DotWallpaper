@@ -59,7 +59,8 @@ jobs:
           releaseName: 'DotWallpaper ${{ github.ref_name }}'
 
           releaseBody: |
-            DotWallpaper ${{ github.ref_name }}
+            ### 🎨 优化 
+            - 优化页面
 
           releaseDraft: false
           prerelease: false

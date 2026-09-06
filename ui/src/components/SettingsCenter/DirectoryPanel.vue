@@ -18,7 +18,7 @@ function resolveDirArg(): string | null {
 
 function displayDir() {
   if (store.currentDir && store.currentDir.trim()) return store.currentDir.trim();
-  return "默认（C:\\Users\\<用户名>\\Pictures\\Wallpaper）";
+  return "默认（C:\\Users\\<用户名>\\Pictures）";
 }
 
 function displayHint() {

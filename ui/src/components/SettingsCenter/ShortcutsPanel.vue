@@ -9,11 +9,11 @@ interface Shortcut {
 }
 
 const shortcuts: Shortcut[] = [
+  { desc: "打开拖放图片到壁纸目录引导", keys: [{ name: "Ctrl", type: "mod" }, { name: "I", type: "key" }] },
   { desc: "将正在预览的壁纸设为桌面", keys: [{ name: "Ctrl", type: "mod" }, { name: "S", type: "key" }] },
   { desc: "重新加载壁纸列表", keys: [{ name: "Ctrl", type: "mod" }, { name: "R", type: "key" }] },
   { desc: "预览上一张 / 下一张壁纸", keys: [{ name: "←", type: "arrow" }, { name: "/ ", type: "sep" }, { name: "→", type: "arrow" }] },
   { desc: "关闭当前弹窗 / 放大预览", keys: [{ name: "Esc", type: "key" }] },
-  { desc: "打开拖放图片到壁纸目录引导", keys: [{ name: "Ctrl", type: "mod" }, { name: "I", type: "key" }] },
 ];
 
 function keyClass(type: string) {
