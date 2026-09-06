@@ -1,4 +1,4 @@
-import {computed, ref} from 'vue'
+import {computed, ref, shallowRef} from 'vue'
 import {defineStore} from 'pinia'
 import type {Update} from '@tauri-apps/plugin-updater'
 
@@ -11,7 +11,7 @@ export const useUpdaterStore = defineStore('updater', () => {
     /**
      * 当前更新对象
      */
-    const update = ref<Update | null>(null)
+    const update = shallowRef<Update | null>(null)
 
     /**
      * 是否正在检查更新
