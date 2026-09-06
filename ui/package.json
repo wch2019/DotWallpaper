@@ -1,7 +1,7 @@
 {
   "name": "dot-wallpaper-ui",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "DotWallpaper 壁纸工具 - Vue 3 前端（独立工程）",
   "scripts": {
