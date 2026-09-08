@@ -143,6 +143,33 @@ async fn list_system_wallpapers(app: tauri::AppHandle) -> Result<Vec<thumbs::Wal
     .map_err(|e| e.to_string())?
 }
 
+/// 在系统资源管理器中定位文件/目录（右键"跳转到当前文件目录"）
+///
+/// 文件使用 explorer /select 打开所在目录并选中该项；目录则直接打开。
+#[tauri::command]
+fn reveal_in_explorer(path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("路径不存在：{path}"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // raw_arg 不经 std 二次转义，直接交给 explorer.exe 解析，
+        // 保证带空格/特殊字符的路径也能被正确识别。
+        let raw = if p.is_dir() {
+            format!("\"{}\"", p.to_string_lossy())
+        } else {
+            format!("/select,\"{}\"", p.to_string_lossy())
+        };
+        std::process::Command::new("explorer.exe")
+            .raw_arg(&raw)
+            .spawn()
+            .map_err(|e| format!("打开资源管理器失败：{e}"))?;
+    }
+    Ok(())
+}
+
 /// 弹出系统目录选择框，返回用户选择的目录路径（取消时返回 None）
 #[tauri::command]
 fn pick_wallpaper_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
@@ -244,6 +271,7 @@ fn main() {
             list_local_wallpapers,
             list_system_wallpapers,
             pick_wallpaper_directory,
+            reveal_in_explorer,
             save_dropped_paths,
             delete_wallpaper,
             get_wallpaper_style,

@@ -106,8 +106,8 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   // ---- 右键菜单 ----
   function openContextMenu(item: WallpaperItem, x: number, y: number) {
     ctxItem.value = item;
-    ctxX.value = Math.min(x, window.innerWidth - 200);
-    ctxY.value = Math.min(y, window.innerHeight - 180);
+    ctxX.value = Math.min(x, window.innerWidth - 216);
+    ctxY.value = Math.min(y, window.innerHeight - 220);
     ctxVisible.value = true;
     // 系统壁纸来源只读：右键菜单不提供删除入口
     ctxReadOnly.value = source.value === "system";
@@ -358,6 +358,20 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     if (action === "set-wallpaper") {
       // 设置桌面不改变"正在预览"的选中态：蓝（预览）与绿（桌面）独立
       await setItemAsDesktop(item);
+      return;
+    }
+
+    if (action === "reveal-folder") {
+      // 在系统资源管理器中打开文件所在目录并定位（本地/系统壁纸通用）
+      if (!item.path) {
+        toast("当前壁纸无本地路径", "warning");
+        return;
+      }
+      try {
+        await invoke("reveal_in_explorer", { path: item.path });
+      } catch (err: unknown) {
+        toast("打开目录失败：" + ((err as Error)?.message || String(err)), "error");
+      }
       return;
     }
 

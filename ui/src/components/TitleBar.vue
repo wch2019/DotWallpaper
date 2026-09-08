@@ -43,7 +43,7 @@ function onTitlebarDblclick(e: MouseEvent) {
         <Images :size="11" :stroke-width="2.4" />
           <img :src="dotCode" alt="App Icon"/>
       </span>
-      <h1 class="truncate text-[13px] font-semibold tracking-wide text-tx">壁纸工具</h1>
+      <h1 class="truncate text-[13px] font-semibold tracking-wide text-tx">DotWallpaper</h1>
     </div>
 
     <div class="titlebar-right flex items-center">
