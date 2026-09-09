@@ -1,19 +1,49 @@
 <script setup lang="ts">
-// Sidebar - 左栏：本地壁纸网格（分页加载 / 右键菜单 / 应用当前壁纸）
-import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
+// Sidebar - 左栏：壁纸网格（分页加载 / 右键菜单 / 应用当前壁纸 / 收藏夹）
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
+import type { Component } from "vue";
+import { NIcon } from "naive-ui";
+import { Layers, Monitor, Star } from "lucide-vue-next";
 import defaultJpg from '../assets/images/default.jpg'
+import { toast } from "../lib/naive-host";
 import {
   baseName,
   thumbSrc,
   useWallpaperStore,
   type WallpaperItem,
+  type WallpaperSource,
 } from "../stores/wallpaper";
 
 const store = useWallpaperStore();
 
+// 各来源选项卡元信息：图标与文案（渲染顺序由 store.sourceOrder 决定）
+const sourceTabMeta: Record<
+  WallpaperSource,
+  { label: string; icon: Component }
+> = {
+  local: { label: "本地", icon: Layers },
+  system: { label: "系统", icon: Monitor },
+  favorites: { label: "收藏", icon: Star },
+};
+
+// 按用户配置顺序 + 可见性过滤后实际渲染的选项卡列表
+const visibleSourceTabs = computed(() =>
+  store.sourceOrder
+    .filter((key) => {
+      if (key === "local") return true;
+      return key === "system"
+        ? store.sourceVisibility.system
+        : store.sourceVisibility.favorites;
+    })
+    .map((key) => ({ key, ...sourceTabMeta[key] }))
+);
+
 const dirHint = computed(() => {
   if (store.source === "system") {
     return "系统壁纸：C:\\Windows\\Web\\Wallpaper（只读）";
+  }
+  if (store.source === "favorites") {
+    return "收藏夹：右键壁纸或点击卡片星标即可收藏/取消收藏";
   }
   return store.currentDir ? "壁纸目录：" + store.currentDir : "壁纸目录：默认（图片）";
 });
@@ -80,6 +110,18 @@ function onItemClick(item: WallpaperItem) {
   store.selectItem(item);
 }
 
+// 收藏星标状态
+function isFav(item: WallpaperItem) {
+  return store.isFavorite(item.path);
+}
+
+// 点击星标：收藏/取消收藏（stopPropagation 防止触发卡片预览）
+function onToggleFav(item: WallpaperItem) {
+  const fav = store.toggleFavorite(item.path);
+  if (fav) toast("已收藏", "success");
+  else toast("已取消收藏", "warning");
+}
+
 function onItemContext(e: MouseEvent, item: WallpaperItem) {
   e.preventDefault();
   store.openContextMenu(item, e.clientX, e.clientY);
@@ -96,18 +138,59 @@ function onScroll() {
 
 // 渲染后若尚未撑满可视区且还有更多，自动补页直到出现滚动条；
 // 同时把新追加/新渲染的缩略图交给 IO 懒加载
-watch(
-  () => store.gridItems.length,
-  async () => {
-    await nextTick();
-    observePendingThumbs();
-    const el = gridWrap.value;
-    if (!el) return;
-    if (el.scrollHeight <= el.clientHeight && store.hasMore) {
-      void store.loadMore();
+let filling = false;
+
+// 核心补页：只要内容未溢出滚动容器且 hasMore，就继续拉下一页，
+// 直到出现滚动条（scrollHeight > clientHeight）或全部加载完。
+// 与滚动 onScroll 互为兜底：滚动条未出现时 onScroll 永不触发，靠本函数补足。
+async function fillGridUntilOverflow() {
+  if (filling) return;
+  const el = gridWrap.value;
+  if (!el) return;
+  filling = true;
+  try {
+    for (let i = 0; i < 12; i++) {
+      observePendingThumbs();
+      if (!store.hasMore) break;
+      // +2 容差：避免"刚好差 1px"反复补页/抖动
+      if (el.scrollHeight > el.clientHeight + 2) break;
+      await store.loadMore(); // loadMore 自带锁与防抖：并发调用立即返回
+      await nextTick();
+      // 双 rAF：等滚动容器完成布局后再测量
+      await new Promise<void>((r) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => r()))
+      );
     }
+  } finally {
+    filling = false;
   }
-);
+}
+
+// 兜底触发器：watch 依赖响应式数组 length 的时机在数据异步 append 时不可靠
+//（数据到达时组件可能没有排队的渲染任务，flush post 永不执行）。
+// 直接观察滚动容器 DOM 子节点变化：任何一批卡片渲染完成都会触发补页检查，
+// 与 watch 完全解耦，天然覆盖 appendBatch / 收藏即时移除 / 切源等所有场景。
+let domObserver: MutationObserver | null = null;
+function startDomObserver() {
+  const el = gridWrap.value;
+  if (!el || domObserver) return;
+  domObserver = new MutationObserver(() => {
+    void fillGridUntilOverflow();
+  });
+  domObserver.observe(el, { childList: true });
+}
+
+onMounted(() => {
+  startDomObserver();
+  // 挂载时补一次初查：若首屏数据在 observer 生效前已 append（length 不再变化），
+  // 且内容不满一屏，此时只能靠这里触发补页，否则将永远无滚动条、无法加载后续
+  void fillGridUntilOverflow();
+});
+
+onUnmounted(() => {
+  domObserver?.disconnect();
+  domObserver = null;
+});
 
 // 卡片图源：缩略图就绪且已放行 → 真实缩略图；否则一律 default.jpg 兜底（加载中/失败同图）
 function thumbSrcFor(item: WallpaperItem): string {
@@ -136,26 +219,18 @@ function onThumbLoad(e: Event) {
     <div class="sidebar-top mb-2.5 flex items-center justify-between gap-2">
       <div class="source-tabs flex items-center gap-2">
         <button
-          class="tab-btn cursor-pointer rounded-full px-3 py-1 text-[12px] font-medium transition-colors"
+          v-for="tab in visibleSourceTabs"
+          :key="tab.key"
+          class="tab-btn flex cursor-pointer items-center gap-1 rounded-full px-3 py-1 text-[12px] font-medium transition-colors"
           :class="
-            store.source === 'local'
+            store.source === tab.key
               ? 'bg-accent-soft text-accent'
               : 'text-dim hover:text-tx'
           "
-          @click="store.setSource('local')"
+          @click="store.setSource(tab.key)"
         >
-          本地
-        </button>
-        <button
-          class="tab-btn cursor-pointer rounded-full px-3 py-1 text-[12px] font-medium transition-colors"
-          :class="
-            store.source === 'system'
-              ? 'bg-accent-soft text-accent'
-              : 'text-dim hover:text-tx'
-          "
-          @click="store.setSource('system')"
-        >
-          系统
+          <NIcon :component="tab.icon" :size="12" />
+          {{ tab.label }}
         </button>
       </div>
       <span v-if="store.allCount > 0" class="tab-count text-[11px] text-dim">
@@ -179,13 +254,14 @@ function onThumbLoad(e: Event) {
       <div
         ref="gridWrap"
         class="grid grid-cols-[repeat(auto-fill,minmax(148px,1fr))] flex-1 gap-2.5 overflow-y-auto p-2.5"
+        style="grid-auto-rows: 182px"
         @scroll="onScroll"
       >
         <template v-if="store.gridItems.length">
           <div
             v-for="item in store.gridItems"
             :key="item.key"
-            class="wallpaper-item group relative flex min-h-[150px] cursor-pointer flex-col overflow-hidden rounded-[10px] border border-line bg-panel-2 transition-all duration-200 hover:-translate-y-0.5 hover:border-accent hover:shadow-[0_8px_20px_rgba(0,0,0,0.32)]"
+            class="wallpaper-item group relative flex cursor-pointer flex-col overflow-hidden rounded-[10px] border border-line bg-panel-2 transition-all duration-200 hover:-translate-y-0.5 hover:border-accent hover:shadow-[0_8px_20px_rgba(0,0,0,0.32)]"
             :class="{
               'state-current !border-ok !shadow-[0_0_0_1px_var(--color-ok),0_8px_20px_rgba(0,0,0,0.32)]': isCurrent(item),
               'state-selected !border-accent !shadow-[0_0_0_1px_var(--color-accent),0_8px_20px_rgba(0,0,0,0.32)]': isSelected(item),
@@ -194,10 +270,13 @@ function onThumbLoad(e: Event) {
             @click="onItemClick(item)"
             @contextmenu="onItemContext($event, item)"
           >
-            <div class="thumb-holder min-h-0 w-full flex-1 overflow-hidden relative">
+            <div
+              class="thumb-holder relative w-full flex-none overflow-hidden"
+              style="height: 150px"
+            >
               <!-- 缩略图：thumb 就绪且进入视口后赋缩略图 src；未就绪/加载失败均回退 default.jpg -->
               <img
-                class="thumb h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.05]"
+                class="thumb absolute inset-0 h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.05]"
                 :src="thumbSrcFor(item)"
                 :data-path="item.path"
                 loading="lazy"
@@ -207,6 +286,20 @@ function onThumbLoad(e: Event) {
                 @load="onThumbLoad"
               />
             </div>
+            <!-- 收藏星标：已收藏常显琥珀色，未收藏 hover 浮现；点击切换收藏 -->
+            <button
+              class="fav-badge absolute right-1.5 top-1.5 z-[6] flex h-[22px] w-[22px] cursor-pointer items-center justify-center rounded-md border border-white/10 bg-black/45 opacity-0 backdrop-blur-[2px] transition-opacity duration-200 group-hover:opacity-100 hover:border-white/25 hover:bg-black/65"
+              :style="isFav(item) ? { opacity: 1 } : undefined"
+              :title="isFav(item) ? '取消收藏' : '收藏 (Ctrl+F)'"
+              @click.stop="onToggleFav(item)"
+            >
+              <NIcon
+                :component="Star"
+                :fill="isFav(item) ? 'currentColor' : 'none'"
+                :size="12"
+                :class="isFav(item) ? 'text-amber-300' : 'text-white/75'"
+              />
+            </button>
             <div class="meta flex min-w-0 items-center gap-1.5 px-2 py-1.5">
               <span class="name truncate text-[11.5px] text-dim">
                 {{ item.title || baseName(item.path || "") || "壁纸" }}
@@ -233,9 +326,11 @@ function onThumbLoad(e: Event) {
           <p class="text-[13px] text-dim">暂无壁纸</p>
           <p class="empty-sub mt-1 text-[11.5px] text-faint">
             {{
-              store.source === "local"
-                  ? "此目录下暂无可用图片，可到设置中更换壁纸目录"
-                  : "系统壁纸目录中暂无可用图片"
+              store.source === "favorites"
+                ? "还没有收藏的壁纸：右键壁纸或点击卡片星标即可收藏"
+                : store.source === "system"
+                  ? "系统壁纸目录中暂无可用图片"
+                  : "此目录下暂无可用图片，可到设置中更换壁纸目录"
             }}
           </p>
         </div>

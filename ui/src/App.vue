@@ -109,6 +109,16 @@ function onKeydown(e: KeyboardEvent) {
     e.preventDefault();
     void store.loadWallpapers();
   }
+  // Ctrl+F = 收藏当前预览壁纸 / 取消收藏（toggle）
+  if (e.ctrlKey && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    const p = store.previewTarget?.path;
+    if (p) {
+      const fav = store.toggleFavorite(p);
+      if (fav) store.message?.success("已收藏");
+      else store.message?.info("已取消收藏");
+    }
+  }
 }
 
 // 点击页面任意非菜单区域关闭右键菜单
@@ -118,8 +128,9 @@ function onGlobalMouseDown(e: MouseEvent) {
 }
 
 onMounted(() => {
-  // 统一在父组件初始化：先恢复目录记忆，再加载数据
+  // 统一在父组件初始化：先恢复目录记忆与收藏书签，再加载数据
   store.restoreDir();
+  store.loadFavorites();
   void store.loadCurrentWallpaper();
   void store.loadDesktopStyle();
   void store.loadWallpapers();

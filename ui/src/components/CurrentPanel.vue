@@ -7,7 +7,7 @@
 //   - 预览样式下拉可即时预览；设为壁纸时若与系统样式不同会同步写注册表
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { NButton, NIcon, NSelect } from "naive-ui";
-import { Check, ChevronLeft, ChevronRight, LayoutGrid, Maximize, X } from "lucide-vue-next";
+import { Check, ChevronLeft, ChevronRight, LayoutGrid, Maximize, Star, X } from "lucide-vue-next";
 import {
   baseName,
   displaySrc,
@@ -15,6 +15,7 @@ import {
   type WallpaperItem,
 } from "../stores/wallpaper";
 import { invoke } from "@tauri-apps/api/core";
+import { toast } from "../lib/naive-host";
 import { currentMonitor } from "@tauri-apps/api/window";
 
 const store = useWallpaperStore();
@@ -321,6 +322,17 @@ const previewIsCurrent = computed(() => {
   return !!p && !!c && p.path === c.path;
 });
 
+// 正在预览的壁纸是否已收藏（书签状态展示与快捷切换）
+const previewIsFav = computed(() => store.isFavorite(previewTarget.value?.path));
+
+function onTogglePreviewFav() {
+  const p = previewTarget.value?.path;
+  if (!p) return;
+  const fav = store.toggleFavorite(p);
+  if (fav) toast("已收藏", "success");
+  else toast("已取消收藏", "warning");
+}
+
 const resInfo = computed(() => {
   const s = screenInfo.value;
   if (!s) return "--";
@@ -500,6 +512,20 @@ onUnmounted(() => {
           <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-accent/90"></span>
           <span class="shrink-0 text-faint">预览</span>
           <span class="min-w-0 truncate text-tx" :title="previewName + '（当前选中，仅预览）'">{{ previewName || "—" }}</span>
+          <!-- 收藏状态：星标展示 + 快捷收藏/取消收藏 -->
+          <button
+            v-if="previewTarget?.path"
+            class="flex shrink-0 cursor-pointer items-center rounded p-0.5 transition-colors hover:bg-white/10"
+            :title="previewIsFav ? '已收藏，点击取消收藏' : '收藏该壁纸 (Ctrl+F)'"
+            @click.stop="onTogglePreviewFav"
+          >
+            <NIcon
+              :component="Star"
+              :fill="previewIsFav ? 'currentColor' : 'none'"
+              :size="13"
+              :class="previewIsFav ? 'text-amber-300' : 'text-faint'"
+            />
+          </button>
         </span>
       </div>
     </div>

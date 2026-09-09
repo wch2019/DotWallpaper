@@ -61,12 +61,15 @@ jobs:
           releaseBody: |
             ### ✨ 新增
             - 新增跳转到当前文件目录
+            - 新增收藏页面
+            - 新增快捷键收藏Ctrl+F
+            - 新增壁纸源设置
   
             ### 🐛 修复
             - 暂无
             
             ### 🎨 优化 
-            - 暂无
+            - 少量图片会直接占满整个高度
 
           releaseDraft: false
           prerelease: false
