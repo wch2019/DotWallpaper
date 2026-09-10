@@ -66,10 +66,10 @@ jobs:
             - 新增壁纸源设置
   
             ### 🐛 修复
-            - 暂无
+            - 少量图片会直接占满整个高度
             
             ### 🎨 优化 
-            - 少量图片会直接占满整个高度
+            - 优化设为壁纸
 
           releaseDraft: false
           prerelease: false

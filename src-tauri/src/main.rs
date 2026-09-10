@@ -143,6 +143,52 @@ async fn list_system_wallpapers(app: tauri::AppHandle) -> Result<Vec<thumbs::Wal
     .map_err(|e| e.to_string())?
 }
 
+/// 按给定路径列表构造列表条目（收藏页专用）。
+///
+/// 与 `list_local_wallpapers` 的关键区别：不扫描当前壁纸目录，只处理传入的
+/// 绝对路径，因此收藏项与当前目录无关 —— 切换壁纸目录后收藏依然完整可见。
+/// 路径不存在 / 非文件 / 扩展名不支持时自动过滤（外部手动删除的收藏项不展示）；
+/// 每条路径所在目录动态加入 asset scope，保证跨目录的缩略图与原图可预览。
+#[tauri::command]
+async fn list_wallpapers_by_paths(
+    paths: Vec<String>,
+    app: tauri::AppHandle,
+) -> Result<Vec<thumbs::WallpaperEntry>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    // 收藏项可能分散在多个目录：逐个把所在目录加入 asset scope
+    let mut scoped: Vec<PathBuf> = Vec::new();
+    for p in &paths {
+        let Some(parent) = PathBuf::from(p).parent().map(|d| d.to_path_buf()) else {
+            continue;
+        };
+        if scoped.contains(&parent) {
+            continue;
+        }
+        ensure_asset_scope(&app, &parent);
+        scoped.push(parent);
+    }
+    let cache = thumbs::cache_dir(&app).ok();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<thumbs::WallpaperEntry>, String> {
+        let valid: Vec<String> = paths
+            .into_iter()
+            .filter(|p| {
+                let path = PathBuf::from(p);
+                let ext_ok = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(wallpaper::is_supported_image_ext)
+                    .unwrap_or(false);
+                path.is_file() && ext_ok
+            })
+            .collect();
+        Ok(thumbs::make_entries(&app, valid, cache.as_deref()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 在系统资源管理器中定位文件/目录（右键"跳转到当前文件目录"）
 ///
 /// 文件使用 explorer /select 打开所在目录并选中该项；目录则直接打开。
@@ -270,6 +316,7 @@ fn main() {
             get_current_wallpaper,
             list_local_wallpapers,
             list_system_wallpapers,
+            list_wallpapers_by_paths,
             pick_wallpaper_directory,
             reveal_in_explorer,
             save_dropped_paths,

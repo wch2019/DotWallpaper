@@ -5,14 +5,14 @@
 use std::ffi::c_void;
 use std::path::PathBuf;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::WIN32_ERROR;
+use windows::Win32::Foundation::{LPARAM, WPARAM, WIN32_ERROR};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
     KEY_READ, KEY_SET_VALUE, REG_SZ, REG_VALUE_TYPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    SystemParametersInfoW, SPI_GETDESKWALLPAPER, SPI_SETDESKWALLPAPER,
-    SPIF_SENDCHANGE, SPIF_UPDATEINIFILE,
+    SendMessageTimeoutW, SystemParametersInfoW, HWND_BROADCAST, SMTO_ABORTIFHUNG,
+    SPI_GETDESKWALLPAPER, SPI_SETDESKWALLPAPER, SPIF_UPDATEINIFILE, WM_SETTINGCHANGE,
 };
 
 /// 支持的壁纸图片扩展名（列表扫描 / 拖入导入 / 删除共用同一权威列表）
@@ -49,17 +49,44 @@ pub fn set_wallpaper_win32(path: &str) -> Result<(), String> {
     // 将路径转换为以 \0 结尾的 UTF-16 缓冲区
     let mut path_utf16: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
 
+    // 不带 SPIF_SENDCHANGE：该标志会同步向所有顶层窗口广播 WM_SETTINGCHANGE，
+    // 并等待各窗口处理完才返回（explorer 繁忙或存在挂起窗口时最长可阻塞数秒），
+    // 导致前端 invoke 迟迟不 resolve、界面一直转圈。壁纸本身在调用时即已生效，
+    // 广播改由后台线程异步补发（见 notify_desktop_changed）。
     unsafe {
         SystemParametersInfoW(
             SPI_SETDESKWALLPAPER,
             0,
             Some(path_utf16.as_mut_ptr() as *mut c_void),
-            SPIF_UPDATEINIFILE | SPIF_SENDCHANGE,
+            SPIF_UPDATEINIFILE,
         )
         .map_err(|e| format!("设置壁纸失败 (Win32 错误: {e})"))?;
     }
 
+    notify_desktop_changed();
+
     Ok(())
+}
+
+/// 后台异步广播 WM_SETTINGCHANGE("Desktop")，通知资源管理器刷新桌面。
+///
+/// 与 SPIF_SENDCHANGE 等价，但放在独立线程执行，并用 SMTO_ABORTIFHUNG +
+/// 500ms 超时避免被挂起窗口拖住；广播失败不影响壁纸已生效的事实。
+fn notify_desktop_changed() {
+    std::thread::spawn(|| {
+        let mut desktop: Vec<u16> = "Desktop".encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            let _ = SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                WPARAM(0),
+                LPARAM(desktop.as_mut_ptr() as isize),
+                SMTO_ABORTIFHUNG,
+                500,
+                None,
+            );
+        }
+    });
 }
 
 /// 通过 Win32 SystemParametersInfoW(SPI_GETDESKWALLPAPER) 获取当前桌面壁纸路径

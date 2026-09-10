@@ -17,7 +17,7 @@ export const SOURCE_VIS_KEY = "dot-wallpaper-source-visibility";
 export type SourceVisibility = { local: true; system: boolean; favorites: boolean };
 // 选项卡展示顺序（独立于可见性：顺序控制渲染次序，可见性控制是否显示）
 export const SOURCE_ORDER_KEY = "dot-wallpaper-source-order";
-export const SOURCE_ORDER_DEFAULT: WallpaperSource[] = ["local", "system", "favorites"];
+export const SOURCE_ORDER_DEFAULT: WallpaperSource[] = ["local", "favorites", "system"];
 
 export interface WallpaperItem {
   key: string;
@@ -457,22 +457,14 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     return !!path && favorites.value.has(path);
   }
 
-  // 收藏页数据：在本地/系统两个来源中按收藏路径取交集，复用缩略图缓存；
-  // 不在任一来源中的失效路径（如外部手动删除）自动不展示
+  // 收藏页数据：直接按收藏路径向后端查询，不经过当前壁纸目录，
+  // 因此切换壁纸目录后收藏依然完整；已被外部删除的失效路径由后端过滤不展示
   async function loadFavoriteEntries(): Promise<WallpaperEntryData[]> {
     const favPaths = [...favorites.value];
     if (!favPaths.length) return [];
-    const [localEntries, systemEntries] = await Promise.all([
-      invoke<WallpaperEntryData[]>("list_local_wallpapers", {
-        directory: resolveDirArg(),
-      }),
-      invoke<WallpaperEntryData[]>("list_system_wallpapers"),
-    ]);
-    const byPath = new Map<string, WallpaperEntryData>();
-    for (const e of [...localEntries, ...systemEntries]) {
-      if (e?.path && !byPath.has(e.path)) byPath.set(e.path, e);
-    }
-    return favPaths.filter((p) => byPath.has(p)).map((p) => byPath.get(p)!);
+    return (await invoke<WallpaperEntryData[]>("list_wallpapers_by_paths", {
+      paths: favPaths,
+    })) as WallpaperEntryData[];
   }
 
   // 从当前已加载列表移除某路径（收藏页取消收藏时即时消失，避免整表重载闪烁）
