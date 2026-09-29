@@ -23,6 +23,17 @@ export function toast(message: string, kind: "default" | "success" | "error" | "
   else naiveHost.message.warning(message, { duration: 3200 });
 }
 
+/**
+ * 持续显示的加载提示，返回销毁函数 —— 供耗时操作前后配对调用：
+ *   const done = toastLoading("正在导入…"); try { … } finally { done(); }
+ * `duration: 0` = 不自动消失（必须显式销毁）。
+ */
+export function toastLoading(message: string): () => void {
+  if (!naiveHost.message) return () => {};
+  const inst = naiveHost.message.loading(message, { duration: 0 });
+  return () => inst.destroy();
+}
+
 /** 危险操作确认（返回用户是否确认） */
 export function confirmDanger(options: {
   title: string;

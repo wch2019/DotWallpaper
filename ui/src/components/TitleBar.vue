@@ -6,7 +6,6 @@ import SettingsCenter from "./SettingsCenter/SettingsCenter.vue";
 import { useUpdaterStore } from "@/stores/updater";
 import { isStoreBuild } from "@/utils/updater";
 import dotCode from "@/assets/dotCode.png";
-import { ref } from "vue";
 
 const appWindow = getCurrentWindow();
 const updaterStore = useUpdaterStore();

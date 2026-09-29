@@ -7,13 +7,29 @@
 mod bing;
 mod thumbs;
 mod wallpaper;
+mod video_wallpaper;
+mod video_thumbs;
 
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_autostart::MacosLauncher;
+
+/// 关闭主窗口时是否隐藏到托盘（true）还是直接退出（false）。
+/// 由前端在读取 localStorage 后通过 `set_close_behavior` 同步过来。
+/// 之所以把关闭决策放到 Rust 侧：主窗口 decorations=false 时唯一的关闭路径是
+/// 程序调用，而前端的 onCloseRequested 监听在页面重载/HMR 期间存在丢失窗口，
+/// 一旦丢失就会直接关窗退进程。这里做兜底，保证行为稳定。
+static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
+
+/// 前端同步"关闭窗口行为"偏好：true=隐藏到托盘，false=直接退出
+#[tauri::command]
+fn set_close_behavior(hide_to_tray: bool) {
+    CLOSE_TO_TRAY.store(hide_to_tray, Ordering::Relaxed);
+}
 
 /// 设置壁纸命令的统一返回：设置成功后返回实际使用的本地路径
 #[derive(Serialize, Clone)]
@@ -70,7 +86,7 @@ async fn delete_wallpaper(path: String, app: tauri::AppHandle) -> Result<(), Str
 }
 
 /// 将目录动态加入 asset protocol scope，使前端 convertFileSrc 可预览该目录图片
-fn ensure_asset_scope(app: &tauri::AppHandle, dir: &PathBuf) {
+pub(crate) fn ensure_asset_scope(app: &tauri::AppHandle, dir: &PathBuf) {
     if let Err(e) = app.asset_protocol_scope().allow_directory(dir, true) {
         eprintln!("[warn] asset scope 添加失败 {}: {e}", dir.display());
     }
@@ -215,7 +231,7 @@ async fn list_wallpapers_by_paths(
                 let ext_ok = path
                     .extension()
                     .and_then(|e| e.to_str())
-                    .map(wallpaper::is_supported_image_ext)
+                    .map(wallpaper::is_supported_wallpaper_ext)
                     .unwrap_or(false);
                 path.is_file() && ext_ok
             })
@@ -325,34 +341,176 @@ fn pick_wallpaper_directory(app: tauri::AppHandle) -> Result<Option<String>, Str
 }
 
 /// 将原生拖放事件给出的本地文件路径保存到壁纸目录，返回保存成功与跳过列表
+///
+/// 拖入的是**任意大小的文件**（视频动辄数百 MB ~ 数 GB），复制必须放到 blocking
+/// 线程，否则会卡死窗口主线程。
 #[tauri::command]
-fn save_dropped_paths(
+async fn save_dropped_paths(
     paths: Vec<String>,
     dir: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<SaveDroppedPathsResult, String> {
     let save_dir = resolve_save_dir(dir);
     ensure_asset_scope(&app, &save_dir);
-    let (saved, skipped) = copy_dropped_files(&paths, &save_dir)?;
-    Ok(SaveDroppedPathsResult { saved, skipped })
+    tauri::async_runtime::spawn_blocking(move || {
+        let (saved, skipped) = copy_dropped_files(&paths, &save_dir)?;
+        Ok(SaveDroppedPathsResult { saved, skipped })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-/// 将外部拖入的本地图片文件复制到壁纸目录（保留原名，重名自动加序号）
-fn copy_dropped_files(paths: &[String], save_dir: &std::path::Path) -> Result<(Vec<String>, Vec<String>), String> {
+/// 单次拖入展开文件夹时收集的文件数上限
+///
+/// 防止误把整个图片库 / 桌面拖进来导致海量复制。达到上限后停止收集并在跳过列表里说明。
+const MAX_DROP_FILES: usize = 500;
+
+/// 递归展开拖入文件夹时的最大目录深度（防止异常目录结构导致超长扫描）
+const MAX_DROP_SCAN_DEPTH: usize = 6;
+
+/// 递归展开拖入文件夹的结果
+struct FolderScan {
+    /// 因"是视频但 WebView2 播不了"（mkv / mov）而跳过的文件数。
+    /// 其他无关文件（txt/pdf…）不计入 —— 它们本来就不是壁纸，不值一提。
+    unplayable: usize,
+    /// 是否**因为达到数量上限而提前停止**
+    truncated: bool,
+}
+
+/// 递归收集目录下**可导入**的壁纸文件（图片 + mp4/webm）
+///
+/// 读目录失败的分支直接跳过（尽力而为）—— 不因为某个子目录无权限就让整次拖入失败。
+fn collect_wallpaper_files(
+    dir: &std::path::Path,
+    out: &mut Vec<PathBuf>,
+    scan: &mut FolderScan,
+    depth: usize,
+) {
+    if depth > MAX_DROP_SCAN_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        // 上限按"已收下的 + 已判定不能播的"合计来算，而不是只看已收下的：
+        // 否则一个装满 mkv 的目录永远不触发上限，会把整棵树走完才发现一个都导不进来。
+        if out.len() + scan.unplayable >= MAX_DROP_FILES {
+            scan.truncated = true;
+            return;
+        }
+        let p = entry.path();
+        if p.is_dir() {
+            collect_wallpaper_files(&p, out, scan, depth + 1);
+            if scan.truncated {
+                return;
+            }
+            continue;
+        }
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        if wallpaper::is_importable_wallpaper_ext(ext) {
+            out.push(p);
+        } else if wallpaper::is_supported_video_ext(ext) {
+            // 认得出是视频容器，但 WebView2 播不了 —— 单独计数，好在提示里说清楚原因
+            scan.unplayable += 1;
+        }
+    }
+}
+
+/// 将外部拖入的本地壁纸文件复制到壁纸目录（保留原名，重名自动加序号）
+///
+/// 放行规则比目录扫描**更严**：图片 + mp4/webm。mkv / mov 会被当场拒收并说明原因
+/// —— 收下来用户点开只会看到黑屏，不如直接告诉他为什么没收。
+/// （手动放进目录的 mkv/mov 仍能被扫描到、能删除，只是拖不进来。）
+///
+/// 拖入**文件夹**时递归取其内所有可导入的壁纸文件（限深度、限数量）。
+fn copy_dropped_files(
+    paths: &[String],
+    save_dir: &std::path::Path,
+) -> Result<(Vec<String>, Vec<String>), String> {
     std::fs::create_dir_all(save_dir)
         .map_err(|e| format!("创建目录失败 {}: {e}", save_dir.display()))?;
 
     let mut saved: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
 
+    // ---- 第一步：把拖入项展开成"待复制的文件"列表（文件夹递归展开）----
+    let mut sources: Vec<PathBuf> = Vec::new();
     for p in paths {
-        let src = std::path::Path::new(p);
-        let Some(name) = src.file_name().map(|n| n.to_string_lossy().to_string()) else {
+        let src = PathBuf::from(p);
+        let name = src
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| p.clone());
+
+        if src.is_dir() {
+            let before = sources.len();
+            let mut scan = FolderScan {
+                unplayable: 0,
+                truncated: false,
+            };
+            collect_wallpaper_files(&src, &mut sources, &mut scan, 0);
+            let added = sources.len() - before;
+
+            if scan.truncated {
+                skipped.push(format!(
+                    "{name}: 文件太多，本次只扫描前 {MAX_DROP_FILES} 个（已导入 {added} 个）"
+                ));
+            } else if added == 0 && scan.unplayable == 0 {
+                skipped.push(format!("{name}: 文件夹里没有壁纸文件"));
+            } else if added == 0 {
+                skipped.push(format!(
+                    "{name}: 里面 {} 个视频不是 MP4/WebM，无法在桌面播放",
+                    scan.unplayable
+                ));
+            } else if scan.unplayable > 0 {
+                skipped.push(format!(
+                    "{name}: 已导入 {added} 个；另有 {} 个视频不是 MP4/WebM，无法在桌面播放",
+                    scan.unplayable
+                ));
+            }
             continue;
-        };
-        let ext = name.rsplit('.').next().unwrap_or_default();
-        if !wallpaper::is_supported_image_ext(ext) {
-            skipped.push(format!("{name}: 不支持的格式（仅 JPG/PNG/BMP/WebP）"));
+        }
+        sources.push(src);
+    }
+
+    // 目标目录的规范化路径：用于跳过"拖进来的文件本来就在目标目录里"的情况
+    //（例如把壁纸目录自身拖进来），否则每个文件都会被复制出一份 `_1` 副本。
+    let save_dir_norm = save_dir
+        .canonicalize()
+        .unwrap_or_else(|_| save_dir.to_path_buf());
+
+    // ---- 第二步：逐个复制 ----
+    for src in sources {
+        let name = src
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if src
+            .canonicalize()
+            .map_or(false, |abs| abs.starts_with(&save_dir_norm))
+        {
+            skipped.push(format!("{name}: 已在壁纸目录中"));
+            continue;
+        }
+
+        // 用 Path::extension 而非 rsplit('.')：后者对"无扩展名但名字恰好叫 mp4"
+        // 的文件会误判为受支持。
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        if !wallpaper::is_importable_wallpaper_ext(ext) {
+            // 分清两种拒绝原因：认得出是视频容器但播不了（要说清"为什么"），
+            // 与压根不是壁纸（列白名单）。同一句话糊过去，用户会以为程序坏了。
+            // 文案写成**纯原因**、不带"已跳过" —— 前端已经用
+            // "跳过 N 个：<原因>" / "没有可保存的文件：<原因>" 包了一层，
+            // 这里再写一遍会变成"…已跳过：…已跳过"。
+            if wallpaper::is_supported_video_ext(ext) {
+                skipped.push(format!("{name}: {ext} 无法在桌面播放（仅支持 MP4/WebM）"));
+            } else {
+                skipped.push(format!(
+                    "{name}: 不支持的格式（支持 JPG/PNG/BMP/WebP 与 MP4/WebM）"
+                ));
+            }
             continue;
         }
 
@@ -363,7 +521,7 @@ fn copy_dropped_files(paths: &[String], save_dir: &std::path::Path) -> Result<(V
             let stem = src
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "image".to_string());
+                .unwrap_or_else(|| "wallpaper".to_string());
             let ext = src
                 .extension()
                 .map(|e| e.to_string_lossy().to_string())
@@ -458,6 +616,24 @@ fn main() {
             setup_tray(app.handle())?;
             Ok(())
         })
+        // 关闭主窗口的兜底处理：按偏好隐藏到托盘，避免前端监听丢失时静默退出。
+        // 真正的退出统一走托盘菜单的"退出"（app.exit(0)）。
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 仅拦截主窗口；动态壁纸窗口由后端自行管理，不在此处处理
+                if window.label() != "main" {
+                    return;
+                }
+                if CLOSE_TO_TRAY.load(Ordering::Relaxed) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                } else {
+                    // 用户选择"关闭即退出"：放行关闭，主窗口消失后进程自然结束
+                    api.prevent_close();
+                    window.app_handle().exit(0);
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             set_wallpaper,
             apply_wallpaper_effect,
@@ -474,7 +650,14 @@ fn main() {
             delete_wallpaper,
             get_wallpaper_style,
             set_desktop_style,
-            get_desktop_screen
+            get_desktop_screen,
+            set_close_behavior,
+            video_wallpaper::set_video_wallpaper,
+            video_wallpaper::set_video_wallpaper_muted,
+            video_wallpaper::set_video_wallpaper_paused,
+            video_wallpaper::stop_video_wallpaper,
+            video_wallpaper::get_video_wallpaper_state,
+            video_wallpaper::list_monitors
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

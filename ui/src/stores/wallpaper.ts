@@ -3,7 +3,7 @@ import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { confirmDanger, toast } from "../lib/naive-host";
+import { confirmDanger, toast, toastLoading } from "../lib/naive-host";
 import { useEffectState } from "./wallpaper/effect";
 import { useSourceState } from "./wallpaper/sources";
 import { useFavoritesState } from "./wallpaper/favorites";
@@ -11,22 +11,50 @@ import { baseName, isRemoteSrc } from "./wallpaper/utils";
 import {
   BING_DIR_KEY,
   DIR_STORAGE_KEY,
+  LOCAL_SORTS,
+  LOCAL_SORT_KEY,
   PAGE_SIZE,
+  VIDEO_MUTED_KEY,
+  isVideoPath,
+  isWebviewPlayable,
   type WallpaperEntryData,
   type ThumbnailUpdatedPayload,
   type WallpaperItem,
   type WallpaperKind,
   type WallpaperSource,
   type BingWallpaperData,
+  type LocalFilter,
+  type LocalSort,
 } from "./wallpaper/types";
 
 // 类型、常量与纯工具函数从子模块统一再导出，调用方 import 路径保持不变
 export * from "./wallpaper/types";
 export * from "./wallpaper/utils";
 export * from "./wallpaper/effect";
-
 // 后台缩略图事件监听全局只注册一次（应用单页生命周期内复用）
 let thumbnailListenerRegistered = false;
+
+/// 读取持久化的本地排序偏好。非法值（含旧版本残留、手改 localStorage）一律回退 "default"，
+/// 否则下拉会拿到一个不在选项里的值、显示为空白。
+function readLocalSort(): LocalSort {
+  try {
+    const raw = localStorage.getItem(LOCAL_SORT_KEY) ?? "";
+    return (LOCAL_SORTS as readonly string[]).includes(raw) ? (raw as LocalSort) : "default";
+  } catch {
+    return "default";
+  }
+}
+
+/// 读取持久化的动态壁纸静音偏好。默认 **false（出声）** ——
+/// 用户主动把某个视频设为桌面动态壁纸时期待的是完整效果，静音是一个
+/// 需要显式打开的开关，而不是"默认悄悄静音、想听还得自己找"。
+function readVideoMuted(): boolean {
+  try {
+    return localStorage.getItem(VIDEO_MUTED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 // ---------- Pinia Store ----------
 export const useWallpaperStore = defineStore("wallpaper", () => {
@@ -57,6 +85,18 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   const bingLocalPaths = ref<Record<string, string>>({});
   const loadingMore = ref(false);
   const allCount = ref(0);
+  // 本地来源的列表加工：**类型筛选 + 名称搜索 + 排序**，三者都在分页之前作用于
+  // rawEntries，因此 allCount 与"x/y"计数反映的都是加工后的数量。
+  // 只作用于本地来源（其余来源类型单一或另有语义，不参与）。
+  const localFilter = ref<LocalFilter>("all");
+  // 名称搜索词：**不持久化** —— 一次性输入，重启后还留着会让人以为"壁纸变少了"。
+  const localQuery = ref("");
+  // 排序方式：持久化（属于长期偏好）
+  const localSort = ref<LocalSort>(readLocalSort());
+  // 本地来源原始集合中的视频数量（加工前统计）。
+  // 用途：决定是否显示"图片/视频"分段控件 —— 纯图片目录给这个切换毫无意义。
+  const localVideoCount = ref(0);
+  const localTotalCount = ref(0);
 
   // 右键菜单状态
   const ctxVisible = ref(false);
@@ -67,6 +107,10 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
   // 分页私有状态
   let loadedCount = 0;
+  // 后端返回的**原始**条目（未经筛选/搜索/排序）。保留一份是为了让"改筛选条件"
+  // 能纯内存重算，不必重新扫描目录。
+  let rawEntries: WallpaperEntryData[] = [];
+  // 当前加工后的条目（分页数据源）
   let allEntries: WallpaperEntryData[] = [];
   let loadingMoreLock = false;
   // hasMore 必须是响应式普通 ref（与 allCount 等一致，pinia 访问时解包为 boolean）：
@@ -75,10 +119,98 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   // 模板 !store.hasMore 恒为 false，底部“已加载全部”永不显示、fill 补页判断失真。
   const hasMore = ref(false);
 
+  // 动态壁纸状态（MVP：视频壁纸；后续 GIF/网页扩展 kind 分支）
+  // monitors：生效的显示器下标；空数组 = 全部显示器
+  // paused：是否暂停（冻结当前帧）；**不持久化**，停止 / 换视频都会复位
+  const videoWallpaper = ref<{
+    enabled: boolean;
+    path: string;
+    monitors: number[];
+    paused: boolean;
+  }>({
+    enabled: false,
+    path: "",
+    monitors: [],
+    paused: false,
+  });
+
+  // 动态壁纸静音偏好（持久化）。
+  //
+  // **刻意与 videoWallpaper 分开存**：前者是"用户的长期偏好"，后者是
+  // "桌面此刻在播什么"。停止动态壁纸、重启应用都不该影响静音偏好 ——
+  // 若把它塞进 videoWallpaper，`stopVideoWallpaper()` 与 `loadVideoWallpaperState()`
+  // 每次整体重置那个对象时都会顺手把它清掉。
+  //
+  // 它是静音的**唯一事实来源**：后端那份只是镜像（播放页读后端状态），
+  // 每次 `setVideoWallpaper` 都会把这里的值带过去。
+  const videoMuted = ref(readVideoMuted());
+
+  // 显示器选择状态：availableMonitors 来自后端 list_monitors，
+  // selectedMonitors 为空数组时语义为"全部显示器"（UI 上用"全部"开关表达）
+  const availableMonitors = ref<
+    {
+      index: number;
+      /** 通俗展示名（不含分辨率/缩放/方位），直接显示即可 */
+      label: string;
+      /** 分辨率文本，如 "3840×2160" */
+      resolution: string;
+      /** 相对主屏的方位，可直接展示的短词："主屏"/"左侧"/…；单屏时为 null */
+      position_hint: string | null;
+      /** 兼容字段：完整字符串（含分辨率/缩放） */
+      name: string;
+      width: number;
+      height: number;
+      scale: number;
+      is_primary: boolean;
+    }[]
+  >([]);
+  const selectedMonitors = ref<number[]>([]);
+
+  // 当前"正在预览"的显示器下标 —— **只影响预览渲染，不影响任何设置行为**。
+  //
+  // 它决定右侧模拟屏按哪台显示器的宽高比和分辨率来画（多屏宽高比可能不同，
+  // 如 16:9 主屏 + 21:9 带鱼屏，不跟着切换就会看到错误的预览比例）。
+  //
+  // 为什么与设置行为解耦：
+  //   - 静态壁纸走 Windows 原生全局路径（`SPI_SETDESKWALLPAPER` 只接受单张图，
+  //     系统本身没有"每屏不同壁纸"的接口），必然作用于所有屏幕 —— 切这个值无意义；
+  //   - 动态壁纸的播放范围由下方的 selectedMonitors 显式选择决定 —— 也不读这个值。
+  // 顶部切显示器因此是一个**纯预览操作**，绝不会改动用户桌面。
+  //
+  // 与 selectedMonitors 的区别：
+  //   - activeMonitor 是**单个**显示器，表示"我现在在看哪一台"
+  //   - selectedMonitors 是**一组**显示器，表示"动态壁纸要在哪几台上播放"
+  // 两者语义完全独立：可以在 2 号屏上预览，而动态壁纸播放范围是 1+2 号屏。
+  const activeMonitor = ref(0);
+
+  // 当前选中的显示器元信息（找不到时回退第一台，保证 UI 永远有可用对象）
+  const activeMonitorInfo = computed(
+    () =>
+      availableMonitors.value.find((m) => m.index === activeMonitor.value) ??
+      availableMonitors.value[0] ??
+      null
+  );
+
+  // 是否有多台显示器（单台时显示器选择器与相关分支整体隐藏）
+  const hasMultipleMonitors = computed(() => availableMonitors.value.length > 1);
+
   // ---- Getter ----
   // 右侧大预览目标：优先"正在预览"，无预览时回退当前桌面壁纸
   const previewTarget = computed<WallpaperItem | null>(
     () => previewItem.value ?? currentWallpaper.value
+  );
+
+  // 本地来源的筛选器是否显示：仅本地来源且确实存在视频时才显示
+  //（纯图片目录给"图片/视频"切换毫无意义，反成噪音）
+  const showLocalFilter = computed(() =>
+    source.value === "local" && !!localVideoCount.value
+  );
+
+  // 本地工具条（名称搜索 + 排序）是否显示：仅本地来源且有内容时。
+  // 判据用**原始**总数而不是加工后的数量 —— 否则搜索到 0 条时工具条会自己消失，
+  // 用户连清空搜索词的入口都没有了。
+  const showLocalTools = computed(
+    () => source.value === "local" && localTotalCount.value > 0
   );
 
   // ---- 右键菜单 ----
@@ -170,7 +302,9 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
   // 某项是否为"当前已设置到桌面的壁纸"
   // （必应项 path 为远程 URL，需经下载记录比对；本地项直接比对路径）
+  // 视频项走动态壁纸状态判定（isCurrentVideo），不参与静态壁纸路径比对
   function isCurrentItem(item: WallpaperItem): boolean {
+    if (item.kind === "video") return isCurrentVideo(item);
     const cur = currentWallpaper.value;
     if (!cur?.path) return false;
     if (item.kind === "bing") {
@@ -215,6 +349,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   }
 
   // 将某张壁纸设为桌面壁纸；可选同步应用桌面样式（仅当与系统当前样式不一致时写注册表）
+  // 视频项（kind === "video"）走动态壁纸分支：不写静态壁纸，不套用壁纸效果
   async function setItemAsDesktop(
     item: WallpaperItem,
     style?: { style: number; tile: boolean }
@@ -224,6 +359,10 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     if (!path) {
       toast("壁纸路径无效", "warning");
       return false;
+    }
+    // 视频动态壁纸：后端创建置底 WebView 窗口播放，与静态壁纸是两条独立路径
+    if (item.kind === "video") {
+      return setVideoWallpaper(path);
     }
     isApplying.value = true;
     try {
@@ -298,9 +437,121 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   }
 
   // ---- 壁纸源加载（分页） ----
+  // 本地来源的列表加工：**类型筛选 + 名称搜索 + 排序**。
+  //
+  // 三者都必须在**分页之前**完成，allCount / hasMore / "x/y" 计数才与可见列表一致。
+  // 其余来源（system/favorites/bing）原样返回，不参与加工。
+  function refineEntries(entries: WallpaperEntryData[]): WallpaperEntryData[] {
+    if (source.value !== "local") return entries;
+
+    let out = entries;
+
+    // ① 类型筛选：按 kind 判定图片/视频。判定口径与 appendBatch 一致（按扩展名），
+    //    保证"筛出来的"与"列表里显示的"完全相同。
+    if (localFilter.value !== "all") {
+      const wantVideo = localFilter.value === "video";
+      out = out.filter((e) => {
+        const kind = e.kind ?? (isVideoPath(e.path) ? "video" : "local");
+        return wantVideo ? kind === "video" : kind !== "video";
+      });
+    }
+
+    // ② 名称搜索：只匹配**文件名**（不含目录），大小写不敏感的子串匹配。
+    //    e.title 只作为兜底 —— 本地来源的条目没有 title，实际都走 baseName。
+    const q = localQuery.value.trim().toLowerCase();
+    if (q) {
+      out = out.filter((e) => (e.title || baseName(e.path)).toLowerCase().includes(q));
+    }
+
+    // ③ 排序：default 保持后端扫描顺序（不做任何排序，等于旧行为）
+    if (localSort.value !== "default") {
+      const nameOf = (e: WallpaperEntryData) => e.title || baseName(e.path);
+      // 自然序：wallpaper2 排在 wallpaper10 前面（纯字典序会反过来）；
+      // sensitivity:"base" 让大小写不影响比较
+      const byName = (a: WallpaperEntryData, b: WallpaperEntryData) =>
+        nameOf(a).localeCompare(nameOf(b), undefined, { numeric: true, sensitivity: "base" });
+      // 数值比较。**缺失的排序键一律沉底，且不随方向翻转** ——
+      // 否则"升序"会把 stat 失败、读不到时间的文件顶到最前面，看起来像排序坏了。
+      const byNum = (a: number | null | undefined, b: number | null | undefined, dir: 1 | -1) => {
+        const av = a ?? null;
+        const bv = b ?? null;
+        if (av === null && bv === null) return 0;
+        if (av === null) return 1;
+        if (bv === null) return -1;
+        return (av - bv) * dir;
+      };
+
+      const sorted = [...out];
+      switch (localSort.value) {
+        case "name-asc":
+          sorted.sort(byName);
+          break;
+        case "name-desc":
+          sorted.sort((a, b) => byName(b, a));
+          break;
+        case "mtime-desc":
+          sorted.sort((a, b) => byNum(a.mtime, b.mtime, -1));
+          break;
+        case "mtime-asc":
+          sorted.sort((a, b) => byNum(a.mtime, b.mtime, 1));
+          break;
+        case "size-desc":
+          sorted.sort((a, b) => byNum(a.size, b.size, -1));
+          break;
+        case "size-asc":
+          sorted.sort((a, b) => byNum(a.size, b.size, 1));
+          break;
+      }
+      out = sorted;
+    }
+
+    return out;
+  }
+
+  // 用当前的筛选/搜索/排序**重算列表**（不重新扫描目录）。
+  //
+  // 这是搜索能逐字符实时响应的前提：后端 list_local_wallpapers 是一次真实的目录扫描
+  // 加逐文件 stat，每敲一个字都调一遍既慢又无谓 —— 原始条目已经在 rawEntries 里了。
+  // 顺带把 setLocalFilter 从"重新加载"改成"重算"，切类型也不再触发目录扫描。
+  function applyLocalRefine() {
+    allEntries = refineEntries(rawEntries);
+    allCount.value = allEntries.length;
+    // 同一个 tick 内清空再 appendBatch，Vue 只会渲染一次，不会看到列表闪空
+    gridItems.value = [];
+    loadedCount = 0;
+    appendBatch();
+  }
+
+  // 切换本地类型筛选
+  function setLocalFilter(next: LocalFilter) {
+    if (localFilter.value === next) return;
+    localFilter.value = next;
+    if (source.value === "local") applyLocalRefine();
+  }
+
+  // 输入名称搜索词（逐字符实时生效：加工全在内存里完成）
+  function setLocalQuery(next: string) {
+    if (localQuery.value === next) return;
+    localQuery.value = next;
+    if (source.value === "local") applyLocalRefine();
+  }
+
+  // 切换排序方式并持久化
+  function setLocalSort(next: LocalSort) {
+    if (localSort.value === next) return;
+    localSort.value = next;
+    try {
+      localStorage.setItem(LOCAL_SORT_KEY, next);
+    } catch {
+      /* localStorage 不可用时静默降级：本次排序仍生效，只是不持久化 */
+    }
+    if (source.value === "local") applyLocalRefine();
+  }
+
   async function loadWallpapers() {
     gridItems.value = [];
     loadedCount = 0;
+    rawEntries = [];
     allEntries = [];
     try {
       // 后端列表返回：原图路径 + 缩略图路径（缩略图可能为空 → 列表显示占位）
@@ -325,8 +576,28 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
           directory: resolveDirArg(),
         })) as WallpaperEntryData[];
       }
-      allCount.value = allEntries.length;
-      appendBatch();
+      // 原始集合存档：之后改筛选/搜索/排序都在它上面纯内存重算，不再重新扫描目录
+      rawEntries = allEntries;
+
+      // 统计原始集合（加工前）：视频数量决定"图片/视频"分段控件是否显示，总数供比例展示
+      if (source.value === "local") {
+        localTotalCount.value = rawEntries.length;
+        localVideoCount.value = rawEntries.filter((e) => {
+          const kind = e.kind ?? (isVideoPath(e.path) ? "video" : "local");
+          return kind === "video";
+        }).length;
+        // 分段控件将因"已无视频"而隐藏时，强制回退到"全部"：
+        // 否则会停留在"视频"筛选却看不到任何切换入口（控件已消失）
+        if (!localVideoCount.value && localFilter.value !== "all") {
+          localFilter.value = "all";
+        }
+      } else {
+        localTotalCount.value = 0;
+        localVideoCount.value = 0;
+      }
+
+      // 加工（筛选 + 搜索 + 排序）必须在分页之前：allCount / hasMore / x-y 计数都由此派生
+      applyLocalRefine();
     } catch (err: unknown) {
       toast("加载壁纸失败：" + ((err as Error)?.message || String(err)), "error");
     }
@@ -335,8 +606,9 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   function appendBatch() {
     const batch = allEntries.slice(loadedCount, loadedCount + PAGE_SIZE);
     batch.forEach((e) => {
-      // 条目可能自带 kind（必应在线壁纸）/ title / date，缺省按本地壁纸处理
-      const kind = e.kind ?? "local";
+      // 条目可能自带 kind（必应在线壁纸）/ title / date，缺省按本地壁纸处理；
+      // 本地来源中的视频按扩展名分类为 "video"（动态壁纸，走另一套预览/设置流程）
+      const kind = e.kind ?? (isVideoPath(e.path) ? "video" : "local");
       gridItems.value.push({
         key: `${kind}_${e.path}`,
         kind,
@@ -412,6 +684,172 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     }
   }
 
+  // ---- 动态壁纸（MVP：视频） ----
+  // 选择本地视频并设为桌面动态壁纸（后端挂载置底 WebView 窗口播放）
+  // 返回是否设置成功，供列表卡片 / 右侧按钮统一提示
+  async function setVideoWallpaper(
+    path: string,
+    monitors?: number[]
+  ): Promise<boolean> {
+    if (!path) return false;
+    // mkv / mov 在 WebView2 上大概率无法解码，置底窗口只会黑屏：
+    // 提前拦截并给出明确原因，避免用户以为功能失效
+    if (!isWebviewPlayable(path)) {
+      toast(
+        "该视频格式（mkv/mov）无法在 WebView 中播放，请改用 mp4 / webm",
+        "warning"
+      );
+      return false;
+    }
+    if (isApplying.value) return false;
+    isApplying.value = true;
+    // 未显式传 monitors 时，沿用当前界面上的选择（保持用户偏好）
+    const sel = monitors ?? selectedMonitors.value;
+    try {
+      await invoke("set_video_wallpaper", {
+        path,
+        monitors: sel,
+        // 把持久化的静音偏好一并带给后端：后端状态是**进程内**的，应用重启后
+        // 回到默认值，而播放页读的是后端状态 —— 不带过去就会"上次静音了、
+        // 这次启用又有声音"。
+        muted: videoMuted.value,
+      });
+      // 设完回读一次后端状态，而不是在本地拼一份：
+      // `paused` 的取舍规则（换视频复位、只改播放范围保持）只写在后端一处，
+      // 本地再抄一遍就是第二份会漂移的规则。
+      await loadVideoWallpaperState();
+      selectedMonitors.value = [...sel];
+      const scope = sel.length
+        ? `（${sel.length} 台显示器）`
+        : "（全部显示器）";
+      // 提示**不带文件名**：用户刚从列表里点的就是这个文件，名字已经在眼前，
+      // 再念一遍是冗余；而长文件名会挤爆 toast 甚至换行。失败时才带具体原因。
+      toast("动态壁纸已启用" + scope, "success");
+      return true;
+    } catch (err: unknown) {
+      toast(
+        "视频壁纸启用失败：" + ((err as Error)?.message || String(err)),
+        "error"
+      );
+      return false;
+    } finally {
+      isApplying.value = false;
+    }
+  }
+
+  // 仅切换生效显示器（不换视频）：复用当前视频路径 + 新选择
+  async function applyVideoMonitors(monitors: number[]): Promise<boolean> {
+    const cur = videoWallpaper.value;
+    if (!cur.enabled || !cur.path) return false;
+    return setVideoWallpaper(cur.path, monitors);
+  }
+
+  // 切换动态壁纸静音。一次写三处：
+  //   ① 本地偏好 ref —— UI 立即反馈（开关状态不等待 IPC 往返）
+  //   ② localStorage   —— 持久化，下次设动态壁纸仍然记得
+  //   ③ 后端           —— 由后端广播给置底窗口（播放页只认后端状态）
+  async function setVideoMuted(muted: boolean): Promise<boolean> {
+    videoMuted.value = muted;
+    try {
+      localStorage.setItem(VIDEO_MUTED_KEY, muted ? "1" : "0");
+    } catch {
+      /* 存储不可用时只影响"下次是否记得"，不影响本次播放 */
+    }
+    try {
+      await invoke("set_video_wallpaper_muted", { muted });
+      return true;
+    } catch (err: unknown) {
+      toast(
+        "静音设置失败：" + ((err as Error)?.message || String(err)),
+        "error"
+      );
+      return false;
+    }
+  }
+
+  // 暂停 / 恢复动态壁纸：冻结当前帧（**不销毁置底窗口**，桌面不会退回静态壁纸），
+  // 恢复时从暂停处继续。与 stopVideoWallpaper 的区别见其注释。
+  async function setVideoPaused(paused: boolean): Promise<boolean> {
+    try {
+      await invoke("set_video_wallpaper_paused", { paused });
+      videoWallpaper.value = { ...videoWallpaper.value, paused };
+      return true;
+    } catch (err: unknown) {
+      toast(
+        "暂停设置失败：" + ((err as Error)?.message || String(err)),
+        "error"
+      );
+      return false;
+    }
+  }
+
+  // 拉取显示器列表（右侧显示器选择与动态壁纸共用）
+  async function loadMonitors() {
+    try {
+      availableMonitors.value = (await invoke("list_monitors")) as typeof availableMonitors.value;
+    } catch {
+      availableMonitors.value = [];
+    }
+    // 当前操作对象失效（拔掉显示器 / 首次加载）时回退到第一台
+    if (!availableMonitors.value.some((m) => m.index === activeMonitor.value)) {
+      activeMonitor.value = availableMonitors.value[0]?.index ?? 0;
+    }
+  }
+
+  // 切换"正在预览"的显示器（**纯预览操作，不改变任何桌面设置**）
+  function setActiveMonitor(index: number) {
+    activeMonitor.value = index;
+  }
+
+  // 停止动态壁纸：销毁置底窗口并复位状态（桌面回到静态壁纸）
+  // **静音偏好不清** —— 它是长期偏好，不是本次播放的临时状态。
+  async function stopVideoWallpaper() {
+    await invoke("stop_video_wallpaper");
+    videoWallpaper.value = {
+      enabled: false,
+      path: "",
+      monitors: [],
+      paused: false,
+    };
+  }
+
+  // 某项是否为"当前正在播放的动态壁纸"（列表绿框 / 右侧状态展示共用）
+  function isCurrentVideo(item: WallpaperItem): boolean {
+    return (
+      item.kind === "video" &&
+      videoWallpaper.value.enabled &&
+      !!item.path &&
+      item.path === videoWallpaper.value.path
+    );
+  }
+
+  // 启动/恢复主界面时同步动态壁纸状态（播放页挂载也用它拉取兜底）
+  //
+  // **刻意不读后端的 muted**：静音的事实来源是本地偏好（videoMuted），
+  // 后端那份只是它的镜像。若在这里用后端的值覆盖本地偏好，
+  // 应用重启后（后端 muted 回到默认 false）就会把用户上次的静音选择抹掉。
+  async function loadVideoWallpaperState() {
+    try {
+      const st = (await invoke("get_video_wallpaper_state")) as {
+        enabled: boolean;
+        path: string;
+        monitors?: number[];
+        paused?: boolean;
+      };
+      const monitors = Array.isArray(st.monitors) ? st.monitors : [];
+      videoWallpaper.value = {
+        enabled: !!st.enabled,
+        path: st.path || "",
+        monitors,
+        paused: !!st.paused,
+      };
+      // 恢复上次的显示器选择（空数组 = 全部）
+      if (monitors.length) selectedMonitors.value = [...monitors];
+    } catch {
+      /* ignore */
+    }
+  }
+
   // ---- 收藏夹 ----
   // 收藏页数据：直接按收藏路径向后端查询，不经过当前壁纸目录，
   // 因此切换壁纸目录后收藏依然完整；已被外部删除的失效路径由后端过滤不展示
@@ -451,27 +889,40 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   }
 
   // ---- 外部拖入保存 ----
-  // 将 Tauri 原生拖放事件给出的本地文件路径复制到壁纸目录并刷新列表
+  // 将 Tauri 原生拖放事件给出的本地文件路径复制到壁纸目录并刷新列表。
+  // 图片与视频都可拖入（放行规则与目录扫描一致）；视频可能很大，后端已把复制
+  // 放到 blocking 线程，这里再补一个"进行中"提示，免得用户以为拖入没生效。
   async function saveDroppedPaths(paths: string[]) {
     if (!paths.length) return;
+
+    const closeLoading = toastLoading(`正在导入 ${paths.length} 个文件…`);
+    let res: { saved: string[]; skipped: string[] } | null = null;
     try {
-      const res = (await invoke("save_dropped_paths", {
+      res = (await invoke("save_dropped_paths", {
         paths,
         dir: resolveDirArg(),
       })) as { saved: string[]; skipped: string[] };
-
-      if (res.saved.length) {
-        toast(
-          `已保存 ${res.saved.length} 张壁纸` +
-            (res.skipped.length ? `，跳过 ${res.skipped.length} 个` : ""),
-          "success"
-        );
-        await loadWallpapers();
-      } else if (res.skipped.length) {
-        toast("没有可保存的图片：" + res.skipped[0], "warning");
-      }
     } catch (err: unknown) {
       toast("保存失败：" + ((err as Error)?.message || String(err)), "error");
+      return;
+    } finally {
+      closeLoading();
+    }
+
+    if (!res) return;
+
+    if (res.saved.length) {
+      // 有跳过项时把**第一条原因**带出来（如"文件夹里没有壁纸文件"、
+      // "文件太多，本次只扫描前 500 个"、"a.mkv: mkv 无法在桌面播放"）——
+      // 只报个数字用户无从判断发生了什么。
+      // 后端给的是**纯原因**，不带"已跳过"这类后缀，拼出来才不重复。
+      const msg =
+        `已保存 ${res.saved.length} 个壁纸` +
+        (res.skipped.length ? `，跳过 ${res.skipped.length} 个：${res.skipped[0]}` : "");
+      toast(msg, res.skipped.length ? "warning" : "success");
+      await loadWallpapers();
+    } else if (res.skipped.length) {
+      toast("没有可保存的文件：" + res.skipped[0], "warning");
     }
   }
 
@@ -481,7 +932,9 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     if (!item) return;
 
     if (action === "set-wallpaper") {
-      // 设置桌面不改变"正在预览"的选中态：蓝（预览）与绿（桌面）独立
+      // 设置桌面不改变"正在预览"的选中态：蓝（预览）与绿（桌面）独立。
+      // 静态图统一走原生全局设置；视频项由 setItemAsDesktop 内部转交动态壁纸分支，
+      // 那里会按"当前操作显示器"决定播放范围。
       await setItemAsDesktop(item);
       return;
     }
@@ -549,6 +1002,10 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       await invoke("delete_wallpaper", { path: item.path });
       // 文件已物理删除：同步清理收藏书签，避免收藏夹出现失效路径
       if (isFavorite(item.path)) removeFavorite(item.path);
+      // 删除的正是正在播放的动态壁纸：同步停掉置底窗口，避免窗口指向已删文件
+      if (isCurrentVideo(item)) {
+        await stopVideoWallpaper();
+      }
       toast("已删除壁纸：" + name, "success");
       await loadWallpapers();
       // 删除的正是当前桌面壁纸：同步刷新桌面真值
@@ -583,12 +1040,31 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     ctxReadOnly,
     sourceVisibility,
     sourceOrder,
+    localFilter,
+    localQuery,
+    localSort,
+    localVideoCount,
+    localTotalCount,
     // getters
     hasMore,
     previewTarget,
+    showLocalFilter,
+    showLocalTools,
     isCurrentItem,
+    isCurrentVideo,
+    videoWallpaper,
+    videoMuted,
+    availableMonitors,
+    selectedMonitors,
+    activeMonitor,
+    activeMonitorInfo,
+    hasMultipleMonitors,
     // actions
     setSource,
+    setLocalFilter,
+    setLocalQuery,
+    setLocalSort,
+    setActiveMonitor,
     openContextMenu,
     closeContextMenu,
     selectItem,
@@ -608,6 +1084,13 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     removeWallpaper,
     setSourceVisibility,
     persistSourceVisibility,
+    setVideoWallpaper,
+    applyVideoMonitors,
+    setVideoMuted,
+    setVideoPaused,
+    loadMonitors,
+    stopVideoWallpaper,
+    loadVideoWallpaperState,
     setEffect,
     moveSourceOrder,
     moveSourceOrderTo,

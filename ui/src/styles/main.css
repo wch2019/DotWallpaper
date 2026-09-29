@@ -64,23 +64,42 @@ body {
   -webkit-app-region: no-drag;
 }
 
-/* 细滚动条 */
-::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+/* ---------- 滚动条 ----------
+   本应用跑在 WebView2（Chromium），滚动条外观**统一**由 ::-webkit-scrollbar 接管。
+   【坑·务必遵守】不要同时写标准的 scrollbar-width / scrollbar-color：
+   这两个属性只要取了非 auto 的值，Chromium 就会**忽略 ::-webkit-scrollbar**，
+   自定义样式静默失效，退回系统原生滚动条（在深色面板上是一根突兀的浅灰条，
+   且没有圆角/悬停反馈）。症状极具迷惑性——样式写了但"看着没生效"。
+   下面这段 * 重置是护栏：万一后续有人误加这两个属性，也不会把全局样式打掉。 */
+* {
+  scrollbar-width: auto !important;
+  scrollbar-color: auto !important;
 }
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+/* 滑块：2px 透明边框 + content-box 裁切 → 在 8px 轨道中央浮起一条 4px 圆角胶囊。
+   刻意用 background-color 而非 background 简写：简写会把 background-clip 重置回
+   border-box，导致悬停瞬间滑块从 4px 胀满整条 8px 轨道（可见跳变）。 */
 ::-webkit-scrollbar-thumb {
-  background: rgb(255 255 255 / 0.15);
-  border-radius: 10px;
+  background-color: rgb(255 255 255 / 0.16);
   border: 2px solid transparent;
+  border-radius: 999px;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgb(255 255 255 / 0.25);
-  background-clip: content-box;
-  border: 2px solid transparent;
+  background-color: rgb(255 255 255 / 0.3);
 }
-::-webkit-scrollbar-track {
+::-webkit-scrollbar-thumb:active {
+  background-color: rgb(255 255 255 / 0.44);
+}
+
+/* 轨道与转角透明，滑块看起来是浮在面板上的 */
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 

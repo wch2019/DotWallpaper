@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口默认能力",
-  "windows": ["main"],
+  "description": "主窗口 + 动态壁纸置底窗口的默认能力",
+  "windows": ["main", "wallpaper-video-*"],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",

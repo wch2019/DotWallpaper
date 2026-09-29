@@ -84,9 +84,8 @@ const currentPanel = computed(() => {
 </template>
 
 <style scoped>
-.nav-list {
-  /* 由 SettingHeader 内部 .nav-list 承接，无需重复布局 */
-}
+/* 导航列表容器的布局由 SettingHeader 的 <nav class="nav-list ..."> 自带 Tailwind 工具类，
+   本来就没有也不需要 .nav-list 规则。原先这里留了一条空的 .nav-list（无任何声明、纯占位），已删除。 */
 .nav-item {
   color: var(--color-dim);
 }

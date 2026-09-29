@@ -65,13 +65,21 @@ onUnmounted(() => {
         class="drag-overlay pointer-events-none fixed inset-0 z-[80] flex items-center justify-center bg-black/35 backdrop-blur-[3px]"
       >
         <div
-          class="drag-overlay-inner flex items-center gap-2.5 rounded-2xl border border-accent/40 bg-accent-soft px-6 py-4 text-[14px] font-medium text-accent shadow-[0_16px_44px_rgba(0,0,0,0.42)]"
+          class="drag-overlay-inner flex flex-col items-center gap-1.5 rounded-2xl border border-accent/40 bg-accent-soft px-6 py-4 text-accent shadow-[0_16px_44px_rgba(0,0,0,0.42)]"
         >
-          <FolderDown :size="20" :stroke-width="2" />
-          拖入松开鼠标，保存到壁纸目录
-          <span class="ml-2 inline-flex items-center gap-1 rounded-md bg-black/15 px-2 py-0.5 text-[11px] text-accent/70">
-            Ctrl + I
-          </span>
+          <div class="flex items-center gap-2.5 text-[14px] font-medium">
+            <FolderDown :size="20" :stroke-width="2" />
+            拖入松开鼠标，保存到壁纸目录
+            <span class="ml-2 inline-flex items-center gap-1 rounded-md bg-black/15 px-2 py-0.5 text-[11px] text-accent/70">
+              Ctrl + I
+            </span>
+          </div>
+          <!-- 把白名单写在拖入之前，而不是等用户拖完再在 toast 里拒 ——
+               少一次无效操作。这里的口径与后端 is_importable_wallpaper_ext 一致：
+               视频只收 WebView2 能播的 mp4/webm（mkv/mov 会被拒）。 -->
+          <div class="text-[11.5px] text-accent/65">
+            图片 JPG / PNG / BMP / WebP　·　视频 MP4 / WebM
+          </div>
         </div>
       </div>
     </Transition>

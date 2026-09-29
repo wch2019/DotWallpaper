@@ -15,12 +15,58 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETDESKWALLPAPER, SPI_SETDESKWALLPAPER, SPIF_UPDATEINIFILE, WM_SETTINGCHANGE,
 };
 
-/// 支持的壁纸图片扩展名（列表扫描 / 拖入导入 / 删除共用同一权威列表）
+/// 支持的壁纸图片扩展名
 const SUPPORTED_EXTS: [&str; 5] = ["jpg", "jpeg", "png", "bmp", "webp"];
+
+/// **放行集**：目录扫描 / 删除 / 设为动态壁纸认的视频容器（含不能播放的）。
+///
+/// **放行 ≠ 可播放**：WebView2 只能可靠渲染 mp4 / webm，mkv / mov 仍会被扫描进来、
+/// 出现在列表里，由前端按 kind 标记为"不支持的格式"。
+/// 之所以把不能播的一起放行，是因为这些文件**已经在用户机器上了** ——
+/// 应用不该假装看不见（用户手动放进目录却"找不到"，比标个角标更让人困惑）。
+///
+/// 拖入导入的口径更严，见 [`is_importable_wallpaper_ext`]。
+const SUPPORTED_VIDEO_EXTS: [&str; 4] = ["mp4", "webm", "mkv", "mov"];
+
+/// **可播放集**：WebView2 能稳定解码的视频容器。
+///
+/// 与前端 `stores/wallpaper/types.ts` 的 `WEBVIEW_PLAYABLE_EXTS` **一一对应**
+/// （前端用它决定"动态壁纸 / 不支持的格式"角标与放大按钮是否可用）。
+/// **两处必须同步改**，否则会出现"前端说能播、后端不给导"这类自相矛盾。
+const PLAYABLE_VIDEO_EXTS: [&str; 2] = ["mp4", "webm"];
 
 /// 是否受支持的壁纸图片扩展名（大小写不敏感）
 pub fn is_supported_image_ext(ext: &str) -> bool {
     SUPPORTED_EXTS.iter().any(|s| s.eq_ignore_ascii_case(ext))
+}
+
+/// 是否受支持的动态壁纸视频扩展名（大小写不敏感）
+pub fn is_supported_video_ext(ext: &str) -> bool {
+    SUPPORTED_VIDEO_EXTS.iter().any(|s| s.eq_ignore_ascii_case(ext))
+}
+
+/// 是否为 WebView2 可稳定播放的视频扩展名（大小写不敏感）
+pub fn is_playable_video_ext(ext: &str) -> bool {
+    PLAYABLE_VIDEO_EXTS.iter().any(|s| s.eq_ignore_ascii_case(ext))
+}
+
+/// 是否受支持的壁纸文件扩展名：**图片 + 视频**（大小写不敏感）。
+///
+/// 这是"这个文件算不算壁纸"的**唯一权威判定**，供目录扫描与删除共用
+/// （视频由前端按 kind 分流为动态壁纸）。只用 `is_supported_image_ext` 的地方，
+/// 应当是有意排除视频的图片专用流程。
+pub fn is_supported_wallpaper_ext(ext: &str) -> bool {
+    is_supported_image_ext(ext) || is_supported_video_ext(ext)
+}
+
+/// 拖入导入的判定：图片 + **可播放的**视频（大小写不敏感）。
+///
+/// 与 [`is_supported_wallpaper_ext`] **故意不同**：扫描要"所见即所得"，
+/// 拖入则主动拒收注定播不了的文件 —— 收下一个 mkv，用户点开只会看到黑屏，
+/// 不如当场告诉他为什么没收（用户明确要求）。
+/// 因此 `mkv` / `mov` 是"能被扫描到、能被删除，但拖不进来"的。
+pub fn is_importable_wallpaper_ext(ext: &str) -> bool {
+    is_supported_image_ext(ext) || is_playable_video_ext(ext)
 }
 
 /// Windows 自带系统壁纸目录（只读展示，禁止删除/写入）
@@ -191,7 +237,7 @@ fn is_under_windows_dir(path: &std::path::Path) -> bool {
     s.starts_with("c:\\windows") || s.starts_with("c:\\windows\\")
 }
 
-/// 递归遍历目录，收集全部支持的图片文件
+/// 递归遍历目录，收集全部支持的壁纸文件（图片 + 动态壁纸视频）
 fn walk_dir(dir: &PathBuf) -> std::io::Result<Vec<String>> {
     let mut found: Vec<String> = Vec::new();
     let mut stack = vec![dir.clone()];
@@ -209,7 +255,7 @@ fn walk_dir(dir: &PathBuf) -> std::io::Result<Vec<String>> {
                 continue;
             }
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if is_supported_image_ext(ext) {
+                if is_supported_wallpaper_ext(ext) {
                     if let Some(p) = path.to_str() {
                         found.push(p.to_string());
                     }
@@ -377,7 +423,7 @@ pub fn get_primary_screen_meta(app: &tauri::AppHandle) -> Result<ScreenMeta, Str
     })
 }
 
-/// 从本地磁盘永久删除壁纸文件（仅限支持的图片扩展名）
+/// 从本地磁盘永久删除壁纸文件（仅限支持的图片/视频扩展名）
 ///
 /// 安全约束：C:\Windows 等系统路径下的壁纸一律只读，禁止删除。
 pub fn delete_wallpaper_file(path: &str) -> Result<(), String> {
@@ -397,7 +443,9 @@ pub fn delete_wallpaper_file(path: &str) -> Result<(), String> {
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
-    if !is_supported_image_ext(&ext) {
+    // 列表已放行视频，删除同步放行（否则列表里的视频无法删除）；
+    // 系统目录拦截在最前，只读约束不受影响
+    if !is_supported_wallpaper_ext(&ext) {
         return Err("不支持的壁纸文件类型".into());
     }
 

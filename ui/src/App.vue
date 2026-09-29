@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { computed, onMounted } from "vue";
 import {
   NConfigProvider,
   NDialogProvider,
@@ -8,9 +8,11 @@ import {
   type GlobalThemeOverrides,
 } from "naive-ui";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 import TitleBar from "./components/TitleBar.vue";
 import Sidebar from "./components/Sidebar.vue";
 import CurrentPanel from "./components/CurrentPanel.vue";
+import VideoWallpaper from "./components/VideoWallpaper.vue";
 import ContextMenu from "./components/ContextMenu.vue";
 import DropZone from "./components/DropZone.vue";
 import NaiveBridge from "./components/NaiveBridge.vue";
@@ -23,6 +25,11 @@ import { isStoreBuild } from '@/utils/updater'
 const store = useWallpaperStore();
 const updaterStore = useUpdaterStore();
 const appWindow = getCurrentWindow();
+
+// 动态壁纸窗口以 ?view=video 加载：只渲染全屏播放页，不渲染主界面
+const isVideoView = computed(
+  () => new URLSearchParams(window.location.search).get("view") === "video"
+);
 
 // Naive UI 主题令牌：与 main.css 设计令牌对齐（冰蓝主色、圆角）
 const themeOverrides: GlobalThemeOverrides = {
@@ -132,9 +139,29 @@ function onGlobalMouseDown(e: MouseEvent) {
   if (!t.closest(".context-menu")) store.closeContextMenu();
 }
 
+// 把"关闭窗口行为"同步给后端兜底：后端在 CloseRequested 时据此决定
+// 隐藏到托盘还是退出，避免前端监听丢失（页面重载/HMR）导致静默退出。
+async function syncCloseBehavior() {
+  let behavior = "tray";
+  try {
+    behavior = localStorage.getItem(CLOSE_BEHAVIOR_KEY) || "tray";
+  } catch {
+    /* ignore */
+  }
+  try {
+    await invoke("set_close_behavior", { hideToTray: behavior === "tray" });
+  } catch {
+    /* 兜底同步失败不影响主流程 */
+  }
+}
+
 onMounted(() => {
   // 关闭窗口行为：按设置决定直接退出或隐藏到系统托盘（后台运行）。
   // 托盘图标由后端常驻，左键单击恢复窗口，右键菜单"退出"彻底结束进程。
+  // 先把偏好同步给后端做兜底：前端监听在页面重载时可能丢失，
+  // 后端持有该开关可保证"关闭窗口"始终按用户设置执行。
+  void syncCloseBehavior();
+
   void appWindow.onCloseRequested(async (event) => {
     let behavior = "exit";
     try {
@@ -153,6 +180,7 @@ onMounted(() => {
   store.loadFavorites();
   void store.loadCurrentWallpaper();
   void store.loadDesktopStyle();
+  void store.loadVideoWallpaperState();
   void store.loadWallpapers();
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("mousedown", onGlobalMouseDown);
@@ -164,7 +192,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <n-config-provider :theme="darkTheme" :theme-overrides="themeOverrides">
+  <VideoWallpaper v-if="isVideoView" />
+  <n-config-provider v-else :theme="darkTheme" :theme-overrides="themeOverrides">
     <n-message-provider placement="top">
       <n-dialog-provider>
         <NaiveBridge>

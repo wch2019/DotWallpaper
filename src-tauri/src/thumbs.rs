@@ -52,6 +52,10 @@ pub struct WallpaperEntry {
     pub path: String,
     /// 缩略图绝对路径；无法生成或仍由后台生成中时为 ""（列表显示占位）
     pub thumb: String,
+    /// 文件修改时间（Unix 秒）；读取失败为 None。**仅供前端排序**，不参与其他逻辑。
+    pub mtime: Option<i64>,
+    /// 文件大小（字节）；读取失败为 None。**仅供前端排序**。
+    pub size: Option<u64>,
 }
 
 /// 缩略图缓存目录：Tauri app_cache_dir 下 thumbnails 子目录
@@ -98,6 +102,20 @@ fn cached_thumb(src: &str, cache: &Path) -> Option<String> {
 fn ensure_thumb_generate(src: &str, cache: &Path) -> Option<String> {
     if let Some(t) = cached_thumb(src, cache) {
         return Some(t);
+    }
+    // 视频：走 Media Foundation 取首帧。
+    // 前端无法做这件事（canvas 被 asset:// 跨源污染，toDataURL 抛 SecurityError），
+    // 故必须在后端生成，与图片缩略图共用缓存目录/命名规则。
+    let ext = Path::new(src)
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if crate::video_thumbs::is_video_ext(&ext) {
+        let target = cache.join(thumb_file_name(src, THUMB_EXT));
+        if crate::video_thumbs::generate_video_thumb(src, &target).is_ok() {
+            return Some(target.to_string_lossy().replace('/', "\\"));
+        }
+        return None;
     }
     let reader = ImageReader::open(src).ok()?;
     let dims = reader.into_dimensions().ok()?;
@@ -190,12 +208,40 @@ fn wait_prefetch(batch: &[String], results: &Arc<Mutex<HashMap<String, Option<St
     }
 }
 
-/// 批量构造列表条目（首屏优先 + 后台渐进）。
+/// 批量构造列表条目（首屏优先 + 后台渐进），并补齐排序元信息。
 ///
 /// `cache` 为 None（缓存目录不可解析）时返回空缩略图条目，不影响列表展示。
 /// 返回条目顺序与输入一致；thumb 为空表示缩略图后台生成中或生成失败，
 /// 前端以占位显示，成功完成后经事件收到更新。
 pub fn make_entries(
+    app: &tauri::AppHandle,
+    paths: Vec<String>,
+    cache: Option<&Path>,
+) -> Vec<WallpaperEntry> {
+    let mut entries = make_entries_inner(app, paths, cache);
+    fill_sort_meta(&mut entries);
+    entries
+}
+
+/// 补齐排序元信息（修改时间 / 文件大小）。
+///
+/// 单独遍历一遍，而不是在下面 4 个构造点各自读：构造点分散在快/慢路径上，
+/// 集中补一次不会漏，也不用把每个 `WallpaperEntry { .. }` 都改一遍。
+/// `fs::metadata` 失败就留 None —— 排序键缺失不该让整个列表失败。
+fn fill_sort_meta(entries: &mut [WallpaperEntry]) {
+    for e in entries.iter_mut() {
+        if let Ok(md) = std::fs::metadata(&e.path) {
+            e.size = Some(md.len());
+            e.mtime = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+        }
+    }
+}
+
+fn make_entries_inner(
     app: &tauri::AppHandle,
     paths: Vec<String>,
     cache: Option<&Path>,
@@ -209,6 +255,8 @@ pub fn make_entries(
             .map(|p| WallpaperEntry {
                 path: p,
                 thumb: String::new(),
+                mtime: None,
+                size: None,
             })
             .collect();
     };
@@ -232,6 +280,8 @@ pub fn make_entries(
             .map(|p| WallpaperEntry {
                 path: p.clone(),
                 thumb: thumb_by_path.get(&p).cloned().unwrap_or_default(),
+                mtime: None,
+                size: None,
             })
             .collect();
     }
@@ -254,6 +304,8 @@ pub fn make_entries(
             .map(|p| WallpaperEntry {
                 path: p.clone(),
                 thumb: thumb_by_path.get(&p).cloned().unwrap_or_default(),
+                mtime: None,
+                size: None,
             })
             .collect();
     }
@@ -273,6 +325,8 @@ pub fn make_entries(
             WallpaperEntry {
                 path: p.clone(),
                 thumb: thumb.unwrap_or_default(),
+                mtime: None,
+                size: None,
             }
         })
         .collect()

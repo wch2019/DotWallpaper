@@ -419,17 +419,8 @@ function errText(e: unknown): string {
 .upd-body {
   margin-top: 16px;
   overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
-}
-
-.upd-body::-webkit-scrollbar {
-  width: 6px;
-}
-
-.upd-body::-webkit-scrollbar-thumb {
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.15);
+  /* 滚动条外观由 main.css 的 ::-webkit-scrollbar 统一接管。
+     勿加 scrollbar-width / scrollbar-color —— 会让伪元素样式整体失效。 */
 }
 
 .upd-body.center {

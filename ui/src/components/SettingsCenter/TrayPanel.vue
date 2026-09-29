@@ -6,6 +6,7 @@ import { Power, LogOut } from "lucide-vue-next";
 import { isEnabled, enable, disable } from "@tauri-apps/plugin-autostart";
 import { CLOSE_BEHAVIOR_KEY } from "@/stores/wallpaper";
 import { toast } from "@/lib/naive-host";
+import { invoke } from "@tauri-apps/api/core";
 
 const behavior = ref<"exit" | "tray">("tray");
 const autoStart = ref(false);
@@ -27,6 +28,10 @@ function onChange(value: "exit" | "tray") {
   } catch {
     /* ignore */
   }
+  // 同步给后端兜底：后端 CloseRequested 时据此决定隐藏到托盘还是退出
+  void invoke("set_close_behavior", { hideToTray: value === "tray" }).catch(() => {
+    /* ignore */
+  });
   toast(
     value === "tray"
       ? "已开启托盘后台运行：关闭窗口将最小化到系统托盘"
