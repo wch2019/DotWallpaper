@@ -18,8 +18,13 @@
 //        兜底的查找，一旦重挂就会**重排整个桌面**；
 //     ④ 巡检线程随"停止 → 再启用"被重复创建，多个线程各自判定、各自可能碰窗口。
 //
-//   现做法：`SETTLED` 登记 + `all_settled` 整轮短路 + 只看父窗口句柄是否有效 +
+//   现做法：`SETTLED` 登记（就位后不重复校正）+ **只在显示器配置变化时才比几何**
+//   （`take_monitor_changed` 指纹，兼顾热插拔）+ 只看父窗口句柄是否有效 +
 //   `allow_spawn` 开关（巡检只读查找）+ 巡检线程只启动一次（`WATCHER_STARTED`）。
+//
+//   为什么不是"每轮都比一次几何"：那看似省事，但一旦物理像素的比较在任何环境下
+//   失准（例如混合 DPI），就会退化成每 4s 一次 SetWindowPos → 又变回成因 ①。
+//   用指纹把"需要校正"限定在真正的配置变化时刻，稳定态才是绝对的零写操作。
 //   机制细节见 `memory/video-wallpaper.md`。
 
 use std::collections::HashSet;
@@ -62,6 +67,13 @@ const RELINK_INTERVAL_SECS: u64 = 4;
 /// 漏监听踩过一次坑，界面还完全无报错）。统一成状态快照后，播放页只有
 /// **一个收敛入口**，新增字段不会漏。
 const VIDEO_STATE_EVENT: &str = "video-wallpaper-state";
+
+/// 显示器配置发生变化（插拔屏 / 改分辨率 / 改缩放）时发给**主窗口**的通知。
+///
+/// 与上面那条不同，这条是**独立的信号而非状态快照**：显示器列表不属于动态壁纸
+/// 状态，硬塞进 `video-wallpaper-state` 会让播放页也被迫处理它。
+/// 主窗口收到后重新拉取显示器列表，避免面板上还显示着早已拔掉的屏幕。
+const MONITORS_CHANGED_EVENT: &str = "monitors-changed";
 
 // ---------- 全局状态 ----------
 
@@ -143,6 +155,47 @@ fn unmark_settled(hwnd: isize) {
 /// 清空全部就位标记
 fn clear_settled() {
     settled().lock().unwrap().clear();
+}
+
+/// 上一轮巡检看到的**显示器配置指纹**。
+///
+/// 用来判断"屏幕插拔 / 分辨率或缩放改动"这类会导致下标漂移与几何失效的事件。
+/// 只有指纹变化时才去重算窗口几何 —— 稳定态下保持"就位后一次都不碰"。
+static LAST_MONITOR_SIG: OnceLock<Mutex<String>> = OnceLock::new();
+
+/// 把显示器列表压成一个可比较的字符串（位置 + 尺寸 + 名称）。
+///
+/// 只比数量是不够的：换一台同数量的屏、或调了分辨率/缩放，
+/// 窗口几何同样会失效，而这些情况下数量没变。
+fn monitor_signature(monitors: &[tauri::window::Monitor]) -> String {
+    monitors
+        .iter()
+        .map(|m| {
+            let p = m.position();
+            let s = m.size();
+            // `Monitor::name()` 返回 `Option<&String>`（不是 `Option<&str>`），
+            // 而 `&String` 没有 Default 实现，`unwrap_or_default()` 编译不过。
+            let name = m.name().map(|s| s.as_str()).unwrap_or("");
+            format!("{}|{}|{}|{}|{}", p.x, p.y, s.width, s.height, name)
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// 显示器配置是否发生了变化（与上一轮相比）。返回 true 的同时会更新指纹。
+///
+/// 首次调用必然返回 true（指纹初始为空），正好让首轮完成一次几何校正。
+fn take_monitor_changed(monitors: &[tauri::window::Monitor]) -> bool {
+    let sig = monitor_signature(monitors);
+    let mut last = LAST_MONITOR_SIG
+        .get_or_init(|| Mutex::new(String::new()))
+        .lock()
+        .unwrap();
+    if *last == sig {
+        return false;
+    }
+    *last = sig;
+    true
 }
 
 /// 动态壁纸状态快照。
@@ -547,77 +600,110 @@ fn spawn_relink_watcher(app: tauri::AppHandle) {
             continue;
         }
         let monitors = app.available_monitors().unwrap_or_default();
+        // 拿不到显示器列表 → **整轮跳过**，一个窗口都别碰。
+        //
+        // 休眠唤醒、显卡驱动重载、远程桌面会话切换的瞬间都可能返回空列表。
+        // 此时 `monitors.get(i)` 对所有下标恒为 None，照着"拔屏"分支走下去
+        // 会把**每一个**窗口都当成"那台显示器没了"而关掉，补齐逻辑再逐个重建
+        // → 一次全屏闪 + 播放位置从头开始，而且用户什么都没做。
+        //
+        // 拿不到信息时的正确反应是"不动"，这与"父窗口取不到时不要乱动"
+        // （见上面 explorer 重启那段的取舍）是同一条原则。
+        // 顺带也避免了把空指纹写进 `LAST_MONITOR_SIG`。
+        if monitors.is_empty() {
+            continue;
+        }
 
-        // 全部窗口都已就位且句柄有效 → 跳过所有探测（最省，且绝无副作用）。
-        // 注意：热插拔补齐不在此 gate 内，见循环末尾。
-        let all_settled = hwnds
-            .iter()
-            .all(|h| *h != 0 && is_settled(HWND(*h as *mut c_void)));
-
-        if !all_settled {
-            for (i, h) in hwnds.iter().enumerate() {
-                if *h == 0 {
-                    continue;
-                }
-                let hwnd = HWND(*h as *mut c_void);
-                if !unsafe { IsWindow(hwnd) }.as_bool() {
-                    // 窗口没了（explorer 重启时父窗口被销毁会连带销毁子窗口）：
-                    // 清掉就位标记，**并把登记句柄置 0** —— 否则下面的热插拔补齐
-                    // 会因为"记录里还有一个非 0 句柄"而认为窗口存在，永远不重建，
-                    // 也就是"explorer 重启后动态壁纸再也不回来"。
-                    unmark_settled(*h);
-                    let mut v = watch_hwnds().lock().unwrap();
-                    if i < v.len() {
-                        v[i] = 0;
-                    }
-                    continue;
-                }
-
-                // ---- 只读校验：**唯一可靠且零副作用的信号是"父窗口句柄还有效"** ----
-                // 刻意**不**比对"父窗口 == 本次找到的 WorkerW"。那个比较要求
-                // 两次独立查找（挂载时那次、巡检这次）返回同一个句柄，一旦不一致
-                // （explorer 重建过、机器上同时存在多个 WorkerW）就会**每轮**都判定
-                // "脱挂"并重挂 → SetParent + SetWindowPos 每 4s 一次 → 周期性闪屏。
-                // 父窗口被销毁时句柄自然失效，那才是真正需要重挂的时机。
-                let cur_parent = unsafe { GetParent(hwnd).unwrap_or(HWND::default()) };
-                let still_attached =
-                    !cur_parent.0.is_null() && unsafe { IsWindow(cur_parent) }.as_bool();
-
-                if still_attached {
-                    // 已就位：不做任何写操作。仅当尺寸真的被外部改坏时才纠正。
-                    if is_settled(hwnd) {
-                        continue;
-                    }
-                    // 未标记就位（首次巡检）：补一次几何后标记。
-                    // 几何基准用**真实父窗口**，而不是再去找一次 WorkerW ——
-                    // 少一次查找就少一次"两次结果不一致"的机会。
-                    if let Some(mon) = monitors.get(i) {
-                        if let Some(geo) = monitor_geo(&app, mon, cur_parent) {
-                            apply_geo_if_changed(hwnd, geo, cur_parent);
-                        }
-                        mark_settled(hwnd);
-                    }
-                    continue;
-                }
-
-                // ---- 父窗口确实失效（explorer 重启等）→ 重新挂载 ----
-                // `allow_spawn = false`：巡检**绝不能**发 WM_SPAWN_WORKERW，
-                // 那条消息会让整个桌面重排 → 正在播放的视频整屏闪一下。
-                unmark_settled(*h);
-                let Some(parent) = attach_to_desktop(hwnd, false) else {
-                    continue;
-                };
-                if let Some(mon) = monitors.get(i) {
-                    if let Some(geo) = monitor_geo(&app, mon, parent) {
-                        apply_geo_if_changed(hwnd, geo, parent);
-                    }
-                }
-                mark_settled(hwnd);
+        // ---- 热插拔检测：显示器配置是否变了（插拔 / 改分辨率 / 改缩放）----
+        // 变化时才去重算几何。稳定态下一律不动 —— "就位后一次都不碰"仍是
+        // 防闪屏的第一原则，不能为了兼容热插拔就每轮都比一次几何。
+        let layout_changed = take_monitor_changed(&monitors);
+        // 配置变了 → 通知主窗口刷新显示器列表。
+        // 面板上的"播放范围"与显示器数量都是启动时拉一次的，不刷新的话
+        // 用户会看到早已拔掉的屏还挂在列表里、勾选与实际不符。
+        // 只发给 main：置底窗口不需要这个事件，它们的几何由本巡检自行调整。
+        if layout_changed {
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.emit(MONITORS_CHANGED_EVENT, ());
             }
         }
 
-        // 热插拔补齐：仅对**选中且在播放**的显示器补建窗口（每轮都检查，
-        // 不受上面 all_settled gate 影响，保证新显示器接入后能自动铺上）。
+        // ---- 逐窗口校验：挂载状态（每轮）+ 几何（仅配置变化时）----
+        //
+        // 稳定态下这里只做**只读**判断（IsWindow / GetParent），不产生任何写操作。
+        // 拔掉一台显示器后 `available_monitors()` 变短、下标整体漂移
+        // （原本的 2 号屏变成 1 号），"已就位"的窗口几何随之失效 ——
+        // 由上面的 `layout_changed` 捕获并纠正。
+        for (i, h) in hwnds.iter().enumerate() {
+            if *h == 0 {
+                continue;
+            }
+            let hwnd = HWND(*h as *mut c_void);
+            if !unsafe { IsWindow(hwnd) }.as_bool() {
+                // 窗口没了（explorer 重启时父窗口被销毁会连带销毁子窗口）：
+                // 清掉就位标记，**并把登记句柄置 0** —— 否则下面的热插拔补齐
+                // 会因为"记录里还有一个非 0 句柄"而认为窗口存在，永远不重建，
+                // 也就是"explorer 重启后动态壁纸再也不回来"。
+                unmark_settled(*h);
+                let mut v = watch_hwnds().lock().unwrap();
+                if i < v.len() {
+                    v[i] = 0;
+                }
+                continue;
+            }
+
+            // ---- 热插拔（拔屏）：本窗口对应的显示器已经不存在 ----
+            // 拔掉一台后可用显示器数变少、尾部下标越界。这些窗口必须关掉，
+            // 否则会残留成孤儿窗口（画面停在旧坐标，或盖住本该显示别的内容的区域）。
+            // 插回来时补齐逻辑会按同样的下标重建，所以这里可以放心关。
+            let Some(mon) = monitors.get(i) else {
+                close_window_at(&app, i, *h);
+                continue;
+            };
+
+            // ---- 只读校验：**唯一可靠且零副作用的信号是"父窗口句柄还有效"** ----
+            // 刻意**不**比对"父窗口 == 本次找到的 WorkerW"。那个比较要求
+            // 两次独立查找（挂载时那次、巡检这次）返回同一个句柄，一旦不一致
+            // （explorer 重建过、机器上同时存在多个 WorkerW）就会**每轮**都判定
+            // "脱挂"并重挂 → SetParent + SetWindowPos 每 4s 一次 → 周期性闪屏。
+            // 父窗口被销毁时句柄自然失效，那才是真正需要重挂的时机。
+            let cur_parent = unsafe { GetParent(hwnd).unwrap_or(HWND::default()) };
+            let still_attached =
+                !cur_parent.0.is_null() && unsafe { IsWindow(cur_parent) }.as_bool();
+
+            if still_attached {
+                // 只在两种情况下比几何：① 显示器配置变了（插拔屏后下标漂移，
+                // 原本"已就位"的窗口此刻坐标就是错的）；② 这个窗口还没就位过
+                // （首次巡检 / 刚重挂完），需要补一次几何。
+                // 其余情况**连 GetWindowRect 都不做**，稳定态保持绝对零写操作。
+                //
+                // 几何基准用**真实父窗口**而不是再去找一次 WorkerW ——
+                // 少一次查找就少一次"两次结果不一致"的机会。
+                if layout_changed || !is_settled(hwnd) {
+                    if let Some(geo) = monitor_geo(&app, mon, cur_parent) {
+                        apply_geo_if_changed(hwnd, geo, cur_parent);
+                    }
+                    mark_settled(hwnd);
+                }
+                continue;
+            }
+
+            // ---- 父窗口确实失效（explorer 重启等）→ 重新挂载 ----
+            // `allow_spawn = false`：巡检**绝不能**发 WM_SPAWN_WORKERW，
+            // 那条消息会让整个桌面重排 → 正在播放的视频整屏闪一下。
+            unmark_settled(*h);
+            let Some(parent) = attach_to_desktop(hwnd, false) else {
+                continue;
+            };
+            if let Some(geo) = monitor_geo(&app, mon, parent) {
+                apply_geo_if_changed(hwnd, geo, parent);
+            }
+            mark_settled(hwnd);
+        }
+
+        // 热插拔补齐（插屏）：对**选中且在播放**的显示器补建缺失窗口。
+        // 与上面的"拔屏关闭"是一对：下标只按当前 `available_monitors()` 的长度算，
+        // 所以插屏后新下标自然进入 targets_of、被建窗；拔屏后越界下标被上面关掉。
         let cur = state().lock().unwrap().clone();
         if cur.enabled && !cur.path.is_empty() {
             for mi in targets_of(&cur, monitors.len()) {
@@ -663,28 +749,65 @@ fn spawn_relink_watcher(app: tauri::AppHandle) {
 ///
 /// - `state.monitors` 为空 → 全部显示器
 /// - 非空 → 仅其中仍然存在的下标（显示器拔出后自动失效，避免索引越界）
+/// - **全部失效 → 回退"全部显示器"**（见函数内注释，这是热插拔的关键兜底）
 ///
 /// 约定：**窗口 label 的序号 == 显示器下标**，二者一一对应，不做重映射，
 /// 这样巡检/补齐/关闭都不需要额外的映射表。
 fn targets_of(st: &VideoWallpaperState, monitor_count: usize) -> Vec<usize> {
     if st.monitors.is_empty() {
-        (0..monitor_count).collect()
-    } else {
-        let mut v: Vec<usize> = st
-            .monitors
-            .iter()
-            .copied()
-            .filter(|i| *i < monitor_count)
-            .collect();
-        v.sort_unstable();
-        v.dedup();
-        v
+        return (0..monitor_count).collect();
     }
+    let mut v: Vec<usize> = st
+        .monitors
+        .iter()
+        .copied()
+        .filter(|i| *i < monitor_count)
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+
+    // 选中的屏**全部**都不存在了（拔屏后数量变少、下标整体漂移）→ 回退全部，
+    // 而不是一台都不播。
+    //
+    // 典型场景：用户选了"只在副屏播"（monitors=[1]），然后拔掉主屏。
+    // 剩下的副屏下标从 1 变成 0，[1] 全部失效 —— 若就此什么都不播，
+    // 用户看到的是"我拔了台屏，动态壁纸就没了"，正是要避免的"影响视频壁纸"。
+    //
+    // **刻意不改写 `st.monitors`**：那只是"当前生效集"的推导，用户的原始选择
+    // 要原样保留，屏插回来后下标复原、选择也就跟着恢复。改了就永久漂移了。
+    //
+    // 与前端 `restoreVideoWallpaper` 里"失效索引全部丢弃 → 回退空数组（=全部）"
+    // 是同一条规则，两处要保持一致。
+    if v.is_empty() {
+        return (0..monitor_count).collect();
+    }
+    v
 }
 
 /// 计算各显示器对应的窗口 label
 fn window_label_for(index: usize) -> String {
     format!("{VIDEO_WINDOW_LABEL_PREFIX}-{index}")
+}
+
+/// 关闭下标 `index` 的置底窗口并清理登记。
+///
+/// 用于**显示器被拔出**（该下标已不存在）与用户收窄播放范围两种场景。
+/// 三步缺一不可：
+///   ① `unmark_settled` —— SETTLED 里若留着旧 HWND，将来被系统复用时会误判"已就位"；
+///   ② `close()` —— 释放 label，否则后续补建会因 label 重名而失败，
+///      表现为"拔掉再插回显示器后壁纸再也铺不上"；
+///   ③ 登记表置 0 —— 否则补齐逻辑认为窗口还在，永远不重建。
+fn close_window_at(app: &tauri::AppHandle, index: usize, hwnd: isize) {
+    if hwnd != 0 {
+        unmark_settled(hwnd);
+    }
+    if let Some(win) = app.get_webview_window(&window_label_for(index)) {
+        let _ = win.close();
+    }
+    let mut v = watch_hwnds().lock().unwrap();
+    if index < v.len() {
+        v[index] = 0;
+    }
 }
 
 /// 清除所有动态壁纸窗口（含已拔出显示器留下的孤儿窗口）
@@ -812,22 +935,11 @@ pub async fn set_video_wallpaper(
         if want.contains(&i) {
             continue;
         }
-        // 先取出旧句柄：close() 后窗口销毁，但 SETTLED 里若留着旧 HWND，
-        // 后续万一被系统复用会误判"已就位"。这里显式解除登记。
-        let old_hwnd = {
-            let v = watch_hwnds().lock().unwrap();
-            v.get(i).copied().unwrap_or(0)
-        };
-        if old_hwnd != 0 {
-            unmark_settled(old_hwnd);
-        }
-        if let Some(win) = app.get_webview_window(&window_label_for(i)) {
-            let _ = win.close();
-        }
-        let mut v = watch_hwnds().lock().unwrap();
-        if i < v.len() {
-            v[i] = 0;
-        }
+        // 与巡检里"拔屏关闭"走同一个 `close_window_at`：三步清理
+        // （解除就位登记 / close 释放 label / 登记表置 0）缺一不可，
+        // 两处各写一遍必然漂移。
+        let old_hwnd = watch_hwnds().lock().unwrap().get(i).copied().unwrap_or(0);
+        close_window_at(&app, i, old_hwnd);
     }
 
     // 2) 对目标显示器：缺失的补建窗口；**已存在的一律不重建**（重建会闪屏）

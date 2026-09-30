@@ -9,6 +9,7 @@ import {
 } from "naive-ui";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import TitleBar from "./components/TitleBar.vue";
 import Sidebar from "./components/Sidebar.vue";
 import CurrentPanel from "./components/CurrentPanel.vue";
@@ -186,6 +187,13 @@ onMounted(() => {
   // 它内部会回读后端状态来同步面板显示。
   void store.restoreVideoWallpaper();
   void store.loadWallpapers();
+
+  // 显示器插拔 / 分辨率或缩放变化：后端巡检每 4s 比对配置指纹，变了就发这个事件。
+  // 面板上的显示器列表是启动时拉一次的，不刷新的话用户会看到早已拔掉的屏还挂在列表里、
+  // "播放范围"的勾选也与实际不符。
+  void listen("monitors-changed", () => {
+    void store.loadMonitors();
+  });
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("mousedown", onGlobalMouseDown);
   window.addEventListener("blur", store.closeContextMenu);
