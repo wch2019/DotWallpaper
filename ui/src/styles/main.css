@@ -1,0 +1,476 @@
+@import "tailwindcss";
+@import "../style.css";
+
+/* ============================================================
+   DotWallpaper 设计令牌（Tailwind CSS v4 @theme）
+   观感跟随 macOS 系统外观：浅色/深色各一套系统色，由 prefers-color-scheme 切换。
+   @theme 里是深色值（浅色在下方 media 查询覆盖），组件一律引用令牌、不写颜色字面量。
+   ============================================================ */
+@theme {
+  /* 背景层级（深色：越靠上越亮） */
+  --color-bg: #1c1c1e;          /* 窗口底色 */
+  --color-bg-2: #232326;        /* 次级底色 */
+  --color-panel: #26262a;       /* 面板 / 卡片 */
+  --color-panel-2: #2f2f34;     /* 悬停底 */
+  --color-elev: #3a3a3f;        /* 弹层 */
+
+  /* 文字 */
+  --color-tx: #ececee;
+  --color-dim: #a1a1a6;
+  --color-faint: #6e6e73;
+
+  /* 边框 */
+  --color-line: rgb(255 255 255 / 0.08);
+  --color-line-2: rgb(255 255 255 / 0.16);
+
+  /* 功能色（macOS 深色模式系统色） */
+  --color-accent: #0a84ff;
+  --color-accent-strong: #409cff;
+  --color-accent-soft: rgb(10 132 255 / 0.18);
+  --color-ok: #30d158;
+  --color-warn: #ffd60a;
+  --color-danger: #ff453a;
+  --color-danger-soft: rgb(255 69 58 / 0.16);
+
+  /* 非背景色：深色模式下用白色低透明度叠加 */
+  --color-hover-line: rgb(255 255 255 / 0.24);  /* 按钮悬停描边 */
+  --color-scroll: rgb(255 255 255 / 0.18);      /* 滚动条滑块 */
+  --color-scroll-2: rgb(255 255 255 / 0.3);     /* 滚动条滑块悬停 */
+  --color-shade: rgb(0 0 0 / 0.35);             /* 凸起件投影 */
+  --color-drop: rgb(0 0 0 / 0.45);              /* 浮层投影（提示条 / 遮罩卡片） */
+
+  /* 字体：macOS SF 优先，中文回退苹方 */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
+    "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+
+  --radius-card: 10px;
+}
+
+/* ---------- 浅色外观：macOS Aqua 系统色 ----------
+   层级方向与深色相反（底色深一档、卡片提亮到接近白），功能色取苹果给浅背景
+   规定的可读版本（深色文字用的红 #d70015 而不是 #ff453a，否则在白底上糊成一片）。
+   Tailwind 的工具类编译成 var(--color-*) 引用，所以覆盖令牌即可整套换色。 */
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-bg: #ececec;
+    --color-bg-2: #e3e3e6;
+    --color-panel: #f9f9fb;
+    --color-panel-2: #ffffff;
+    --color-elev: #ffffff;
+
+    --color-tx: #1d1d1f;
+    --color-dim: #6e6e73;
+    --color-faint: #98989d;
+
+    --color-line: rgb(0 0 0 / 0.1);
+    --color-line-2: rgb(0 0 0 / 0.18);
+
+    --color-accent: #007aff;
+    --color-accent-strong: #0062d9;
+    --color-accent-soft: rgb(0 122 255 / 0.12);
+    --color-ok: #248a3d;
+    --color-warn: #b26a00;
+    --color-danger: #d70015;
+    --color-danger-soft: rgb(215 0 21 / 0.1);
+
+    --color-hover-line: rgb(0 0 0 / 0.22);
+    --color-scroll: rgb(0 0 0 / 0.16);
+    --color-scroll-2: rgb(0 0 0 / 0.28);
+    --color-shade: rgb(0 0 0 / 0.12);
+    --color-drop: rgb(0 0 0 / 0.18);
+  }
+}
+
+/* ---------- 全局基础 ---------- */
+html,
+body,
+#app {
+  height: 100%;
+  overflow: hidden;
+  /* 原生控件（滚动条 / select / 表单）与 prefers-color-scheme 一起跟随系统外观 */
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-tx);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  letter-spacing: -0.006em;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+/* 细滚动条（macOS overlay 风格） */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-scroll);
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-scroll-2);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- macOS 控件基元（供组件复用，避免引入组件库） ---------- */
+
+/* 圆角卡片 */
+.mac-card {
+  background: var(--color-panel);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-card);
+}
+
+/* ---------- Tahoe / macOS 26 workspace layer ----------
+   保留轻量实现：只使用 CSS backdrop-filter 与系统色，不引入组件库或图片资源。
+   玻璃效果只放在窗口的三层结构上，避免每个缩略图都产生昂贵的合成层。 */
+.dw-app-shell {
+  position: relative;
+  isolation: isolate;
+  background:
+    radial-gradient(65rem 34rem at 8% -18%, rgb(10 132 255 / 0.12), transparent 62%),
+    radial-gradient(44rem 28rem at 96% 100%, rgb(88 86 214 / 0.09), transparent 64%),
+    var(--color-bg);
+}
+.dw-workspace {
+  min-width: 0;
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+.dw-toolbar {
+  position: relative;
+  z-index: 2;
+  margin: 10px 12px 8px;
+  border: 1px solid var(--color-line-2);
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--color-bg-2) 72%, transparent);
+  box-shadow: 0 8px 26px var(--color-shade), inset 0 1px 0 rgb(255 255 255 / 0.08);
+  backdrop-filter: blur(24px) saturate(1.35);
+  -webkit-backdrop-filter: blur(24px) saturate(1.35);
+}
+.dw-toolbar-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  flex: none;
+  border: 1px solid var(--color-accent-soft);
+  border-radius: 8px;
+  background: var(--color-accent-soft);
+}
+.dw-toolbar-divider {
+  background: var(--color-line-2);
+}
+.dw-library-pane,
+.dw-inspector {
+  border: 1px solid var(--color-line);
+  background: color-mix(in srgb, var(--color-bg-2) 68%, transparent);
+  box-shadow: 0 16px 40px var(--color-shade), inset 0 1px 0 rgb(255 255 255 / 0.05);
+  backdrop-filter: blur(20px) saturate(1.2);
+  -webkit-backdrop-filter: blur(20px) saturate(1.2);
+}
+.dw-library-pane {
+  border-radius: 16px;
+}
+.dw-inspector {
+  width: clamp(300px, 28vw, 390px);
+  max-width: 40vw;
+  border-radius: 16px;
+}
+.dw-eyebrow {
+  color: var(--color-faint);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.dw-media-tile {
+  border-color: var(--color-line);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.08);
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+.dw-media-tile:hover {
+  transform: translateY(-2px);
+  border-color: var(--color-line-2);
+  box-shadow: 0 10px 24px var(--color-shade);
+}
+.dw-media-tile:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+}
+.dw-media-tile-selected {
+  border-color: var(--color-accent) !important;
+  background: var(--color-accent-soft);
+  box-shadow:
+    0 0 0 2px var(--color-accent-soft),
+    0 10px 28px var(--color-shade),
+    inset 0 0 0 1px rgb(255 255 255 / 0.12);
+}
+.dw-media-tile-selected:hover {
+  border-color: var(--color-accent-strong) !important;
+  box-shadow:
+    0 0 0 3px var(--color-accent-soft),
+    0 12px 30px var(--color-shade),
+    inset 0 0 0 1px rgb(255 255 255 / 0.14);
+}
+.dw-media-tile-selected img {
+  filter: saturate(1.08) brightness(1.04);
+}
+.dw-media-tile-check {
+  position: absolute;
+  z-index: 3;
+  right: 7px;
+  top: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 2px solid rgb(255 255 255 / 0.9);
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: #fff;
+  box-shadow: 0 3px 10px rgb(0 0 0 / 0.28);
+}
+.dw-media-tile-wash {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(135deg, rgb(10 132 255 / 0.2), transparent 54%);
+}
+.dw-preview-card,
+.dw-control-card {
+  background: color-mix(in srgb, var(--color-panel) 80%, transparent);
+  box-shadow: 0 8px 24px var(--color-shade), inset 0 1px 0 rgb(255 255 255 / 0.06);
+  backdrop-filter: blur(18px) saturate(1.15);
+  -webkit-backdrop-filter: blur(18px) saturate(1.15);
+}
+.dw-preview-stage {
+  min-height: 190px;
+  background-color: var(--color-bg);
+}
+.dw-preview-stage video,
+.dw-preview-stage img {
+  display: block;
+  min-height: 100%;
+  background: var(--color-bg);
+}
+
+@media (max-width: 760px) {
+  .dw-workspace {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .dw-library-pane {
+    min-height: 360px;
+    flex: none;
+  }
+  .dw-inspector {
+    width: auto;
+    max-width: none;
+    min-height: 320px;
+    overflow: visible;
+  }
+}
+
+/* 按钮：push button */
+.mac-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 11px;
+  border-radius: 7px;
+  border: 1px solid var(--color-line-2);
+  background: linear-gradient(180deg, var(--color-panel-2), var(--color-panel));
+  color: var(--color-tx);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  white-space: nowrap;
+}
+.mac-btn:hover:not(:disabled) {
+  border-color: var(--color-hover-line);
+  background: linear-gradient(180deg, var(--color-elev), var(--color-panel-2));
+}
+.mac-btn:active:not(:disabled) {
+  background: var(--color-bg-2);
+}
+.mac-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.mac-btn-primary {
+  border-color: transparent;
+  background: var(--color-accent);
+  color: #fff;
+}
+.mac-btn-primary:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--color-accent-strong);
+}
+.mac-btn-danger {
+  color: var(--color-danger);
+}
+.mac-btn-danger:hover:not(:disabled) {
+  background: var(--color-danger-soft);
+  border-color: var(--color-danger);
+}
+
+/* 分段控件（Segmented Control）：用于 填充 / 适应 */
+.mac-segmented {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-line);
+}
+.mac-segment {
+  height: 22px;
+  padding: 0 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--color-dim);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.mac-segment:hover {
+  color: var(--color-tx);
+}
+.mac-segment-active {
+  background: var(--color-elev);
+  color: var(--color-tx);
+  box-shadow: 0 1px 2px var(--color-shade);
+}
+
+/* 下拉（保留原生 select 语义，仅去外观） */
+.mac-select {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 26px;
+  max-width: 260px;
+  padding: 0 26px 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--color-line-2);
+  background-color: var(--color-panel-2);
+  color: var(--color-tx);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='rgb(161 161 166)' stroke-width='3'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+.mac-select:hover {
+  background-color: var(--color-elev);
+}
+/* 箭头画在 data URI 里，令牌进不去，只能按外观各给一份描边色 */
+@media (prefers-color-scheme: light) {
+  .mac-select {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='rgb(110 110 115)' stroke-width='3'><path d='M6 9l6 6 6-6'/></svg>");
+  }
+}
+
+/* 单行输入（媒体库搜索） */
+.mac-input {
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--color-line);
+  background-color: var(--color-bg-2);
+  color: var(--color-tx);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.mac-input::placeholder {
+  color: var(--color-faint);
+}
+.mac-input:focus {
+  border-color: var(--color-accent);
+  background-color: var(--color-panel);
+}
+
+/* 开关（Switch） */
+.mac-switch {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  flex: none;
+  border-radius: 999px;
+  border: none;
+  background: var(--color-elev);
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+.mac-switch-on {
+  background: var(--color-accent);
+}
+.mac-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px var(--color-shade);
+  transition: transform 0.18s cubic-bezier(0.3, 0, 0.2, 1);
+}
+.mac-switch-on .mac-switch-knob {
+  transform: translateX(14px);
+}
+
+/* 缩略图缺省占位：纯 CSS 渐变（替代原 default.jpg） */
+.media-fallback {
+  background:
+    radial-gradient(120% 120% at 20% 10%, #454b5a 0%, #2a2e38 45%, #1d2027 100%);
+}
+@media (prefers-color-scheme: light) {
+  .media-fallback {
+    background:
+      radial-gradient(120% 120% at 20% 10%, #e4e7ee 0%, #cdd2dc 45%, #bcc2ce 100%);
+  }
+}
+
+/* 状态徽章 */
+.mac-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 500;
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-line);
+}
+
+/* 过渡动画（尊重系统减少动效设置） */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

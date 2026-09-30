@@ -1,0 +1,45 @@
+[package]
+name = "dotwallpaper"
+version = "0.1.2"
+description = "DotWallpaper 壁纸工具"
+edition = "2021"
+
+[lib]
+name = "dotwallpaper"
+crate-type = ["staticlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# macOS AppKit / Foundation / CoreGraphics / AVFoundation
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "block2"] }
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+objc2-av-foundation = { version = "0.3", features = [
+    "AVPlayer",
+    "AVPlayerItem",
+    "AVPlayerLayer",
+    "AVPlayerLooper",
+    "AVAsset",
+    "AVAssetImageGenerator",
+    "objc2-core-graphics",
+    "objc2-core-media",
+] }
+# AVPlayerLayer 继承自 CALayer：setFrame 等方法由 quartz-core 提供，删掉即 E0599（已实测）
+objc2-quartz-core = "0.3"
+objc2-core-graphics = { version = "0.3", features = ["CGDirectDisplay", "CGWindowLevel"] }
+objc2-core-media = "0.3"
+
+[profile.release]
+panic = "unwind"
+codegen-units = 1
+lto = true
+opt-level = "s"
+# strip=false：Apple 新版 strip 路径会产出 mis-aligned LINKEDIT 的 dylib，
+# 破坏编译期 proc-macro dlopen（rust-lang/rust#157750）；发布后单独对主二进制 strip
+strip = false
+incremental = false

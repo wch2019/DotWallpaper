@@ -1,0 +1,327 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {
+    };
+    objectVersion = 56;
+    objects = {
+
+/* Begin PBXBuildFile section */
+        B00000000000000000000001 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000001; };
+        B00000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000002; };
+        B00000000000000000000003 /* DotWallpaperCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000003; };
+        B00000000000000000000006 /* libdotwallpaper.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F00000000000000000000006; };
+        B00000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000007; };
+        B00000000000000000000008 /* dist in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000008; };
+        B00000000000000000000010 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F00000000000000000000010; };
+        B00000000000000000000011 /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F00000000000000000000011; };
+        B00000000000000000000012 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F00000000000000000000012; };
+        B00000000000000000000013 /* CoreMedia.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F00000000000000000000013; };
+        B00000000000000000000014 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F00000000000000000000014; };
+        B00000000000000000000015 /* ImageIO.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F00000000000000000000015; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+        F00000000000000000000000 /* WallpaperEngine.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WallpaperEngine.app; sourceTree = BUILT_PRODUCTS_DIR; };
+        F00000000000000000000001 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WallpaperEngineApp/Sources/App/WallpaperEngineApp.swift"; sourceTree = "<group>"; };
+        F00000000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WallpaperEngineApp/Sources/App/ContentView.swift"; sourceTree = "<group>"; };
+        F00000000000000000000003 /* DotWallpaperCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WallpaperEngineApp/Sources/Core/DotWallpaperCore.swift"; sourceTree = "<group>"; };
+        F00000000000000000000006 /* libdotwallpaper.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libdotwallpaper.a; path = "../rust-core/target/aarch64-apple-darwin/debug/libdotwallpaper.a"; sourceTree = "<group>"; };
+        F00000000000000000000007 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "WallpaperEngineApp/Resources/Assets.xcassets"; sourceTree = "<group>"; };
+        F00000000000000000000008 /* dist */ = {isa = PBXFileReference; lastKnownFileType = folder; name = dist; path = "../ui/dist"; sourceTree = "<group>"; };
+        F00000000000000000000010 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+        F00000000000000000000011 /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = System/Library/Frameworks/AppKit.framework; sourceTree = SDKROOT; };
+        F00000000000000000000012 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
+        F00000000000000000000013 /* CoreMedia.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMedia.framework; path = System/Library/Frameworks/CoreMedia.framework; sourceTree = SDKROOT; };
+        F00000000000000000000014 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+        F00000000000000000000015 /* ImageIO.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ImageIO.framework; path = System/Library/Frameworks/ImageIO.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+        P00000000000000000000001 /* Frameworks */ = {
+            isa = PBXFrameworksBuildPhase;
+            buildActionMask = 2147483647;
+            files = (
+                B00000000000000000000006 /* libdotwallpaper.a in Frameworks */,
+                B00000000000000000000010 /* AVFoundation.framework in Frameworks */,
+                B00000000000000000000011 /* AppKit.framework in Frameworks */,
+                B00000000000000000000012 /* CoreGraphics.framework in Frameworks */,
+                B00000000000000000000013 /* CoreMedia.framework in Frameworks */,
+                B00000000000000000000014 /* QuartzCore.framework in Frameworks */,
+                B00000000000000000000015 /* ImageIO.framework in Frameworks */,
+            );
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+        G00000000000000000000001 /* MainGroup */ = {
+            isa = PBXGroup;
+            children = (
+                F00000000000000000000001 /* App.swift */,
+                F00000000000000000000002 /* ContentView.swift */,
+                F00000000000000000000003 /* DotWallpaperCore.swift */,
+                F00000000000000000000007 /* Assets.xcassets */,
+                F00000000000000000000008 /* dist */,
+            );
+            sourceTree = "<group>";
+        };
+        G00000000000000000000002 /* Products */ = {
+            isa = PBXGroup;
+            children = (
+                F00000000000000000000000 /* WallpaperEngine.app */,
+            );
+            name = Products;
+            sourceTree = "<group>";
+        };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+        T00000000000000000000001 /* WallpaperEngine */ = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = C00000000000000000000002;
+            buildPhases = (
+                P00000000000000000000009 /* Build Frontend */,
+                P00000000000000000000000 /* Build Rust */,
+                P00000000000000000000002 /* Sources */,
+                P00000000000000000000001 /* Frameworks */,
+                P00000000000000000000003 /* Resources */,
+            );
+            buildRules = (
+            );
+            dependencies = (
+            );
+            name = WallpaperEngine;
+            productName = WallpaperEngine;
+            productReference = F00000000000000000000000 /* WallpaperEngine.app */;
+            productType = "com.apple.product-type.application";
+        };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+        J00000000000000000000000 /* Project object */ = {
+            isa = PBXProject;
+            attributes = {
+                BuildIndependentTargetsInParallel = 1;
+                LastSwiftUpdateCheck = 1500;
+                TargetAttributes = {
+                    T00000000000000000000001 = {
+                        CreatedOnToolsVersion = 15.0;
+                    };
+                };
+            };
+            buildConfigurationList = C00000000000000000000001;
+            compatibilityVersion = "Xcode 14.0";
+            developmentRegion = en;
+            hasScannedForEncodings = 0;
+            knownRegions = (
+                en,
+                Base,
+            );
+            mainGroup = G00000000000000000000001;
+            productRefGroup = G00000000000000000000002;
+            projectDirPath = "";
+            projectRoot = "";
+            targets = (
+                T00000000000000000000001 /* WallpaperEngine */,
+            );
+        };
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+        P00000000000000000000003 /* Resources */ = {
+            isa = PBXResourcesBuildPhase;
+            buildActionMask = 2147483647;
+            files = (
+                B00000000000000000000007 /* Assets.xcassets in Resources */,
+                B00000000000000000000008 /* dist in Resources */,
+            );
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+        P00000000000000000000009 /* Build Frontend */ = {
+            isa = PBXShellScriptBuildPhase;
+            buildActionMask = 2147483647;
+            files = (
+            );
+            inputFileListPaths = (
+            );
+            inputPaths = (
+                "${SRCROOT}/../ui/package.json",
+                "${SRCROOT}/../ui/package-lock.json",
+            );
+            name = "Build Frontend";
+            outputFileListPaths = (
+            );
+            outputPaths = (
+                "${SRCROOT}/../ui/dist/index.html",
+            );
+            runOnlyForDeploymentPostprocessing = 0;
+            shellPath = /bin/bash;
+            shellScript = "set -e\ncd \"${SRCROOT}/..\"\ncommand -v npm >/dev/null 2>&1 || { echo \"error: npm is required to build the Vue frontend\" >&2; exit 1; }\nnpm --prefix ui run build\necho \"Frontend build complete\"\n";
+            showEnvVarsInLog = 0;
+        };
+        P00000000000000000000000 /* Build Rust */ = {
+            isa = PBXShellScriptBuildPhase;
+            alwaysOutOfDate = 1;
+            buildActionMask = 2147483647;
+            files = (
+            );
+            inputFileListPaths = (
+            );
+            inputPaths = (
+            );
+            name = "Build Rust";
+            outputFileListPaths = (
+            );
+            outputPaths = (
+            );
+            runOnlyForDeploymentPostprocessing = 0;
+            shellPath = /bin/bash;
+            shellScript = "set -e\nRUST_PROJECT_DIR=\"${SRCROOT}/../rust-core\"\nINCLUDE_DIR=\"${SRCROOT}/../include\"\nmkdir -p \"$INCLUDE_DIR\"\ncd \"$RUST_PROJECT_DIR\"\nif [ \"$CONFIGURATION\" = \"Release\" ]; then\n    cargo build --lib --release --target aarch64-apple-darwin\nelse\n    cargo build --lib --target aarch64-apple-darwin\nfi\ncp dotwallpaper.h \"$INCLUDE_DIR/dotwallpaper.h\"\necho \"Rust build complete\"\n";
+            showEnvVarsInLog = 0;
+        };
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+        P00000000000000000000002 /* Sources */ = {
+            isa = PBXSourcesBuildPhase;
+            buildActionMask = 2147483647;
+            files = (
+                B00000000000000000000001 /* App.swift in Sources */,
+                B00000000000000000000002 /* ContentView.swift in Sources */,
+                B00000000000000000000003 /* DotWallpaperCore.swift in Sources */,
+            );
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+        C00000000000000000000010 /* Debug */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ALWAYS_SEARCH_USER_PATHS = NO;
+                ARCHS = arm64;
+                CLANG_ENABLE_MODULES = YES;
+                CLANG_ENABLE_OBJC_ARC = YES;
+                COPY_PHASE_STRIP = NO;
+                DEBUG_INFORMATION_FORMAT = dwarf;
+                ENABLE_STRICT_OBJC_MSGSEND = YES;
+                GCC_DYNAMIC_NO_PIC = NO;
+                GCC_OPTIMIZATION_LEVEL = 0;
+                GCC_PREPROCESSOR_DEFINITIONS = (
+                    "DEBUG=1",
+                    "$(inherited)",
+                );
+                GENERATE_INFOPLIST_FILE = YES;
+                MACOSX_DEPLOYMENT_TARGET = 26.0;
+                ONLY_ACTIVE_ARCH = YES;
+                SDKROOT = macosx;
+                SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+                VALID_ARCHS = arm64;
+            };
+            name = Debug;
+        };
+        C00000000000000000000011 /* Release */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ALWAYS_SEARCH_USER_PATHS = NO;
+                ARCHS = arm64;
+                CLANG_ENABLE_MODULES = YES;
+                CLANG_ENABLE_OBJC_ARC = YES;
+                COPY_PHASE_STRIP = NO;
+                DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+                ENABLE_NS_ASSERTIONS = NO;
+                ENABLE_STRICT_OBJC_MSGSEND = YES;
+                GCC_OPTIMIZATION_LEVEL = s;
+                GENERATE_INFOPLIST_FILE = YES;
+                MACOSX_DEPLOYMENT_TARGET = 26.0;
+                SDKROOT = macosx;
+                SWIFT_COMPILATION_MODE = wholemodule;
+                VALID_ARCHS = arm64;
+            };
+            name = Release;
+        };
+        C00000000000000000000020 /* Debug */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+                CODE_SIGN_STYLE = Automatic;
+                COMBINE_HIDPI_IMAGES = YES;
+                DEVELOPMENT_TEAM = "";
+                ENABLE_HARDENED_RUNTIME = YES;
+                INFOPLIST_KEY_CFBundleDisplayName = WallpaperEngine;
+                INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+                INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+                LD_RUNPATH_SEARCH_PATHS = (
+                    "$(inherited)",
+                    "@executable_path/../Frameworks",
+                );
+                LIBRARY_SEARCH_PATHS = (
+                    "$(inherited)",
+                    "$(PROJECT_DIR)/../rust-core/target/aarch64-apple-darwin/debug",
+                );
+                MARKETING_VERSION = 0.1.2;
+                PRODUCT_BUNDLE_IDENTIFIER = com.dot.wallpaper;
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SWIFT_VERSION = 5.0;
+                USER_HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/../include";
+                SWIFT_OBJC_BRIDGING_HEADER = "WallpaperEngineApp/WallpaperEngineApp-Bridging-Header.h";
+            };
+            name = Debug;
+        };
+        C00000000000000000000021 /* Release */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+                CODE_SIGN_STYLE = Automatic;
+                COMBINE_HIDPI_IMAGES = YES;
+                DEVELOPMENT_TEAM = "";
+                ENABLE_HARDENED_RUNTIME = YES;
+                INFOPLIST_KEY_CFBundleDisplayName = WallpaperEngine;
+                INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+                INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+                LD_RUNPATH_SEARCH_PATHS = (
+                    "$(inherited)",
+                    "@executable_path/../Frameworks",
+                );
+                LIBRARY_SEARCH_PATHS = (
+                    "$(inherited)",
+                    "$(PROJECT_DIR)/../rust-core/target/aarch64-apple-darwin/release",
+                );
+                MARKETING_VERSION = 0.1.2;
+                PRODUCT_BUNDLE_IDENTIFIER = com.dot.wallpaper;
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SWIFT_VERSION = 5.0;
+                USER_HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/../include";
+                SWIFT_OBJC_BRIDGING_HEADER = "WallpaperEngineApp/WallpaperEngineApp-Bridging-Header.h";
+            };
+            name = Release;
+        };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+        C00000000000000000000001 /* Build configuration list for PBXProject "WallpaperEngine" */ = {
+            isa = XCConfigurationList;
+            buildConfigurations = (
+                C00000000000000000000010 /* Debug */,
+                C00000000000000000000011 /* Release */,
+            );
+            defaultConfigurationIsVisible = 0;
+            defaultConfigurationName = Debug;
+        };
+        C00000000000000000000002 /* Build configuration list for PBXNativeTarget "WallpaperEngine" */ = {
+            isa = XCConfigurationList;
+            buildConfigurations = (
+                C00000000000000000000020 /* Debug */,
+                C00000000000000000000021 /* Release */,
+            );
+            defaultConfigurationIsVisible = 0;
+            defaultConfigurationName = Debug;
+        };
+/* End XCConfigurationList section */
+    };
+    rootObject = J00000000000000000000000 /* Project object */;
+}

@@ -1,0 +1,12 @@
+{
+  "name": "dot-wallpaper",
+  "private": true,
+  "version": "0.1.2",
+  "description": "WallpaperEngine macOS 26+ native Xcode app",
+  "scripts": {
+    "dev": "npm --prefix ui run dev",
+    "build:mac": "bash scripts/release_mac.sh",
+    "build:mac:app": "bash scripts/build_xcode_mac.sh",
+    "release:mac": "bash scripts/release_mac.sh"
+  }
+}
