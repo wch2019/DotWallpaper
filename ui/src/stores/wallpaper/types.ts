@@ -95,6 +95,17 @@ export type CloseBehavior = "exit" | "tray"; // 关闭窗口：exit=直接退出
 /// 持久化的是**偏好**而非运行时状态：暂停不持久化（重启后本就没有动态壁纸，
 /// 存它没有意义），静音则希望"下次设动态壁纸还是静的"。
 export const VIDEO_MUTED_KEY = "dot-wallpaper-video-muted";
+
+/// 动态壁纸"上次生效项"的 localStorage 键（值 JSON：`{ path, monitors }`）。
+///
+/// 用于**应用重启后自动恢复桌面动态壁纸**：后端状态是进程内的，重启即清空，
+/// 所以要靠前端把"上次设了什么、播在哪几台"记下来，启动时重放一次。
+///
+/// 生命期：设为动态壁纸时写入（含只改播放范围），主动"停止"时清除 ——
+/// 停止是明确的用户意图，清掉才能保证下次启动不会自作主张地又播起来。
+/// 记录里的文件若已被删除/移动，恢复会失败，届时清除记录（后端会校验文件存在）。
+export const VIDEO_ACTIVE_KEY = "dot-wallpaper-video-active";
+
 export const PAGE_SIZE = 12; // 每页加载张数
 
 /// 动态壁纸视频扩展名（与后端 wallpaper::SUPPORTED_VIDEO_EXTS 保持一致）

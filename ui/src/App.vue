@@ -181,6 +181,10 @@ onMounted(() => {
   void store.loadCurrentWallpaper();
   void store.loadDesktopStyle();
   void store.loadVideoWallpaperState();
+  // 自动恢复上次的动态壁纸：后端状态是进程内的、重启即清空，
+  // 靠 localStorage 里记的"上次生效项"重放一次。**必须在 loadVideoWallpaperState 之后** ——
+  // 它内部会回读后端状态来同步面板显示。
+  void store.restoreVideoWallpaper();
   void store.loadWallpapers();
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("mousedown", onGlobalMouseDown);

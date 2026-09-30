@@ -14,6 +14,7 @@ import {
   LOCAL_SORTS,
   LOCAL_SORT_KEY,
   PAGE_SIZE,
+  VIDEO_ACTIVE_KEY,
   VIDEO_MUTED_KEY,
   isVideoPath,
   isWebviewPlayable,
@@ -685,11 +686,54 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   }
 
   // ---- 动态壁纸（MVP：视频） ----
+
+  // 上次生效的动态壁纸记录：用于**应用重启后自动恢复**（见 restoreVideoWallpaper）。
+  // 后端状态是进程内的，重启即清空，所以这份记录是恢复的唯一依据。
+  //
+  // 读写一律吞掉异常：隐私模式/存储被禁用时 localStorage 会抛错，
+  // 而"恢复不了动态壁纸"只是少一项便利，不该让整个 store 初始化失败。
+  function readVideoActive(): { path: string; monitors: number[] } | null {
+    try {
+      const raw = localStorage.getItem(VIDEO_ACTIVE_KEY);
+      if (!raw) return null;
+      const o = JSON.parse(raw) as { path?: unknown; monitors?: unknown };
+      if (typeof o?.path !== "string" || !o.path) return null;
+      return {
+        path: o.path,
+        monitors: Array.isArray(o.monitors)
+          ? o.monitors.filter((i): i is number => typeof i === "number")
+          : [],
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function writeVideoActive(path: string, monitors: number[]) {
+    try {
+      localStorage.setItem(VIDEO_ACTIVE_KEY, JSON.stringify({ path, monitors }));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function clearVideoActive() {
+    try {
+      localStorage.removeItem(VIDEO_ACTIVE_KEY);
+    } catch {
+      /* ignore */
+    }
+  }
+
   // 选择本地视频并设为桌面动态壁纸（后端挂载置底 WebView 窗口播放）
   // 返回是否设置成功，供列表卡片 / 右侧按钮统一提示
+  //
+  // `opts.silent`：抑制成功 toast，供**启动自动恢复**使用 —— 那时用户没有主动操作，
+  // 弹一条"已启用"是噪音（面板上的状态与文件名本身就是反馈）。失败仍会提示。
   async function setVideoWallpaper(
     path: string,
-    monitors?: number[]
+    monitors?: number[],
+    opts?: { silent?: boolean }
   ): Promise<boolean> {
     if (!path) return false;
     // mkv / mov 在 WebView2 上大概率无法解码，置底窗口只会黑屏：
@@ -719,6 +763,11 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       // 本地再抄一遍就是第二份会漂移的规则。
       await loadVideoWallpaperState();
       selectedMonitors.value = [...sel];
+      // 记下"上次生效项"，下次启动据此自动恢复。
+      // 只改播放范围也要更新（applyVideoMonitors 走的是同一条路径）——
+      // 否则恢复时会用回旧范围，用户上次调过的选择就丢了。
+      writeVideoActive(path, sel);
+      if (opts?.silent) return true;
       const scope = sel.length
         ? `（${sel.length} 台显示器）`
         : "（全部显示器）";
@@ -811,6 +860,9 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       monitors: [],
       paused: false,
     };
+    // 清除"上次生效项"：停止是明确的用户意图，
+    // 不清掉的话下次启动会自作主张地又播起来。
+    clearVideoActive();
   }
 
   // 某项是否为"当前正在播放的动态壁纸"（列表绿框 / 右侧状态展示共用）
@@ -848,6 +900,39 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     } catch {
       /* ignore */
     }
+  }
+
+  // 应用启动时**自动恢复**上次的动态壁纸：退出前设过、且没有被主动停止的话，
+  // 重放一次即可（后端状态是进程内的，重启后必然是空的）。
+  //
+  // 为什么放在前端而不是后端 setup：持久化走 localStorage 是本项目约定；
+  // 且这里复用既有的 setVideoWallpaper 路径（回读状态 + 带静音偏好），
+  // 后端无需新增存储与序列化代码。
+  //
+  // **失败就清除记录**：最常见原因是视频文件已被删除/移动（后端会校验存在性并
+  // 返回 Err），留着只会让每次启动都白试一次、白弹一条错误。
+  async function restoreVideoWallpaper() {
+    const saved = readVideoActive();
+    if (!saved) return;
+    // 后端已经在同一路径上播放 → 无需重放。常见于页面重载 / HMR：
+    // 那时进程没退出、后端状态还在，再设一次纯属多余（虽不会重建窗口，
+    // 但会把播放范围重算一遍）。真正的冷启动后端状态必为空，不会走到这里。
+    if (videoWallpaper.value.enabled && videoWallpaper.value.path === saved.path) {
+      return;
+    }
+
+    // 显示器可能已变化（拔屏 / 换接口 / 改为扩展模式）：先拉列表再丢失效索引。
+    // 后端 targets_of 同样会过滤，但前端先滤一遍能让"播放范围"的勾选同步正确。
+    await loadMonitors();
+    let monitors = saved.monitors;
+    if (availableMonitors.value.length) {
+      const valid = monitors.filter((i) => i < availableMonitors.value.length);
+      // 全部失效 → 回退"全部显示器"（空数组），而不是一台都不播
+      monitors = valid.length ? valid : [];
+    }
+
+    const ok = await setVideoWallpaper(saved.path, monitors, { silent: true });
+    if (!ok) clearVideoActive();
   }
 
   // ---- 收藏夹 ----
@@ -1091,6 +1176,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     loadMonitors,
     stopVideoWallpaper,
     loadVideoWallpaperState,
+    restoreVideoWallpaper,
     setEffect,
     moveSourceOrder,
     moveSourceOrderTo,
