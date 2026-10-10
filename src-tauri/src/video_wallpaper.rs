@@ -10,17 +10,23 @@
 //   表面并触发整窗重绘 —— 正在播放的视频就会可见地闪一下。所以"先判断是否幂等、
 //   相同就跳过"是**不够的**，必须做到"绝不调用"。
 //
-//   已踩过的四个成因（每一个都单独造成过可见闪屏）：
+//   已踩过的五个成因（每一个都单独造成过可见闪屏）：
 //     ① 早期每 4s 无条件执行 SetParent + SetWindowPos；
 //     ② 巡检用"父窗口 == 本次找到的 WorkerW"判定脱挂 —— 这要求挂载那次与巡检这次
 //        两次独立查找返回同一个句柄，不一致就**每轮**重挂；
 //     ③ 巡检调用的 `attach_to_desktop` 内部用的是带 `WM_SPAWN_WORKERW`(0x052C)
 //        兜底的查找，一旦重挂就会**重排整个桌面**；
-//     ④ 巡检线程随"停止 → 再启用"被重复创建，多个线程各自判定、各自可能碰窗口。
+//     ④ 巡检线程随"停止 → 再启用"被重复创建，多个线程各自判定、各自可能碰窗口；
+//     ⑤ **用 `GetParent` 判"是否还挂在桌面层"** —— `SetParent` 不给窗口加
+//        `WS_CHILD`，而 `GetParent` 对"非 child、非 popup"的窗口按规范返回 NULL，
+//        于是**每轮都判定脱挂**、每 4s 重挂一次。必须用 `GetAncestor(GA_PARENT)`，
+//        见 `real_parent` / `is_attached_to_desktop`。（2026-10-10 实测确认：
+//        双屏下窗口 `WS_VISIBLE` 每 4.1s 被清掉再设回，正是这个反复重挂的指纹。）
 //
 //   现做法：`SETTLED` 登记（就位后不重复校正）+ **只在显示器配置变化时才比几何**
-//   （`take_monitor_changed` 指纹，兼顾热插拔）+ 只看父窗口句柄是否有效 +
-//   `allow_spawn` 开关（巡检只读查找）+ 巡检线程只启动一次（`WATCHER_STARTED`）。
+//   （`take_monitor_changed` 指纹，兼顾热插拔）+ 只看**真实父窗口**是否有效
+//   （`is_attached_to_desktop`）+ `allow_spawn` 开关（巡检只读查找）
+//   + 巡检线程只启动一次（`WATCHER_STARTED`）。
 //
 //   为什么不是"每轮都比一次几何"：那看似省事，但一旦物理像素的比较在任何环境下
 //   失准（例如混合 DPI），就会退化成每 4s 一次 SetWindowPos → 又变回成因 ①。
@@ -38,10 +44,10 @@ use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetParent, GetWindowLongPtrW,
-    GetWindowRect, IsWindow, IsWindowVisible, SendMessageTimeoutW, SetParent, SetWindowLongPtrW,
-    SetWindowPos, GWL_EXSTYLE, SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOREDRAW, SWP_NOSENDCHANGING, SWP_NOSIZE, WS_EX_NOACTIVATE,
+    EnumWindows, FindWindowExW, FindWindowW, GetAncestor, GetClassNameW, GetDesktopWindow,
+    GetParent, GetWindowLongPtrW, GetWindowRect, IsWindow, IsWindowVisible, SendMessageTimeoutW,
+    SetParent, SetWindowLongPtrW, SetWindowPos, GA_PARENT, GWL_EXSTYLE, SMTO_ABORTIFHUNG,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW, SWP_NOSENDCHANGING, SWP_NOSIZE, WS_EX_NOACTIVATE,
 };
 
 /// 视频扩展名判定**只有一份**（在 `wallpaper.rs`），这里原样再导出。
@@ -167,8 +173,15 @@ static LAST_MONITOR_SIG: OnceLock<Mutex<String>> = OnceLock::new();
 ///
 /// 只比数量是不够的：换一台同数量的屏、或调了分辨率/缩放，
 /// 窗口几何同样会失效，而这些情况下数量没变。
+///
+/// **必须顺序无关（先排序再拼接）**：`available_monitors()` 的顺序来自
+/// `EnumDisplayMonitors`，系统并不保证跨调用稳定。一旦顺序抖动而我们又按顺序比对，
+/// 每轮都会判成"配置变了" → 对每个窗口重算几何 → `SetWindowPos` 每 4s 一次
+/// → **多显示器下的周期性闪屏**（单显示器不存在顺序问题，所以只在多屏出现）。
+/// 更糟的是：顺序抖动时按顺序重算几何，等于把窗口在两台屏之间来回搬。
+/// 排序后，"屏的集合"没变就不算变化，真实插拔/改分辨率仍会因元组变化而被发现。
 fn monitor_signature(monitors: &[tauri::window::Monitor]) -> String {
-    monitors
+    let mut parts: Vec<String> = monitors
         .iter()
         .map(|m| {
             let p = m.position();
@@ -178,8 +191,9 @@ fn monitor_signature(monitors: &[tauri::window::Monitor]) -> String {
             let name = m.name().map(|s| s.as_str()).unwrap_or("");
             format!("{}|{}|{}|{}|{}", p.x, p.y, s.width, s.height, name)
         })
-        .collect::<Vec<_>>()
-        .join(";")
+        .collect();
+    parts.sort_unstable();
+    parts.join(";")
 }
 
 /// 显示器配置是否发生了变化（与上一轮相比）。返回 true 的同时会更新指纹。
@@ -371,6 +385,52 @@ fn find_desktop_workerw() -> Option<HWND> {
     }
 }
 
+/// 取窗口的**真实父窗口**：`GetAncestor(hwnd, GA_PARENT)`。
+///
+/// **绝不要用 `GetParent` 判断"有没有挂到桌面层"。** 这是本模块最后一个
+/// 周期性闪屏的根因（实测确认，勿凭直觉改回去）：
+///
+/// `SetParent(hwnd, worker)` 只把窗口挂到 WorkerW 下，**不会**给窗口加 `WS_CHILD`
+/// 样式（Win32 明确如此：SetParent 不修改 WS_CHILD / WS_POPUP）。而 `GetParent`
+/// 的语义是三分的：
+///   ① child 窗口          → 返回父窗口；
+///   ② 带 `WS_POPUP` 的顶层 → 返回 owner；
+///   ③ **其余情况一律返回 NULL**。
+/// 我们的置底窗口是"无 `WS_CHILD` 的 overlapped 窗口"，正好落进第 ③ 类。
+///
+/// 实测（双屏、动态壁纸运行中）：
+/// ```text
+/// hwnd 0x5B257E  style=0x14CB0000（WS_CHILD 未置、WS_POPUP 未置）
+///    GetParent              = 0x0        ← 恒为 NULL
+///    GetAncestor(GA_PARENT) = 0x325C8    ← 正确返回 WorkerW
+/// ```
+/// 于是巡检里 `still_attached = !GetParent(hwnd).is_null()` **恒为 false**
+/// → 每轮都判定"脱挂" → 每 4s 一次 `SetParent` + `SetWindowPos`
+/// → 重建绘制表面 → **用户看到的周期性闪屏**。窗口的 `WS_VISIBLE` 位实测
+/// 每 4.1s 被清掉、约 130ms 后再设回，正是这个反复重挂的指纹。
+///
+/// 注意 `GA_PARENT` 对**真正的顶层窗口**返回的是**桌面窗口**而不是 NULL，
+/// 所以判"是否已挂载"必须用 `is_attached_to_desktop()`，不能只判非空。
+fn real_parent(hwnd: HWND) -> HWND {
+    unsafe { GetAncestor(hwnd, GA_PARENT) }
+}
+
+/// 窗口是否已挂到桌面层：有父窗口，且该父窗口**不是桌面窗口本身**。
+///
+/// 顶层窗口的 `GA_PARENT` 就是桌面窗口 —— 那是"浮在桌面上、并未挂载"的状态，
+/// 必须排除，否则巡检会以为一个普通顶层窗口"已就位"而永不自愈
+/// （症状：窗口没挂到图标层下面，却再也不会被纠正）。
+fn is_attached_to_desktop(hwnd: HWND) -> bool {
+    let p = real_parent(hwnd);
+    if p.0.is_null() {
+        return false;
+    }
+    if p == unsafe { GetDesktopWindow() } {
+        return false;
+    }
+    unsafe { IsWindow(p) }.as_bool()
+}
+
 /// 将窗口挂到桌面图标之下，返回实际父窗口（用于几何换算）。
 ///
 /// 关键：**只在父窗口确实变化时才 SetParent**。
@@ -391,7 +451,10 @@ fn attach_to_desktop(hwnd: HWND, allow_spawn: bool) -> Option<HWND> {
         } else {
             find_desktop_workerw_readonly()?
         };
-        let cur_parent = GetParent(hwnd).unwrap_or(HWND::default());
+        // 用 `real_parent` 而不是 `GetParent` —— 后者对本窗口恒返回 NULL，
+        // 这个短路就永远不会生效，于是每轮都真的执行一次 SetParent（闪屏）。
+        // 详见 `real_parent` 的注释。
+        let cur_parent = real_parent(hwnd);
         if cur_parent == worker {
             return Some(worker); // 已挂在目标父窗口下，无需重排
         }
@@ -579,6 +642,25 @@ fn find_desktop_workerw_readonly() -> Option<HWND> {
     None
 }
 
+/// 上次已经打印过的"补建窗口失败"信息。
+///
+/// 巡检每 4s 一轮，补建失败会一直重试；不去重的话同一条错误会无限刷屏，
+/// 而这类失败恰恰是最需要被看见的（"新显示器上一直没有壁纸"的根因就在这）。
+static LAST_CREATE_ERR: OnceLock<Mutex<String>> = OnceLock::new();
+
+/// 记录一次补建失败：内容与上次相同就静默（避免每 4s 刷一条）。
+fn note_create_error(msg: String) {
+    let mut last = LAST_CREATE_ERR
+        .get_or_init(|| Mutex::new(String::new()))
+        .lock()
+        .unwrap();
+    if *last == msg {
+        return;
+    }
+    eprintln!("[warn] {msg}");
+    *last = msg;
+}
+
 /// 启动后台巡检线程：只做**只读校验**，发现窗口真的脱离桌面层（explorer 重启
 /// 重建 WorkerW）才重新挂载；已就位且父窗口正常的窗口**一次都不触碰**。
 ///
@@ -630,7 +712,7 @@ fn spawn_relink_watcher(app: tauri::AppHandle) {
 
         // ---- 逐窗口校验：挂载状态（每轮）+ 几何（仅配置变化时）----
         //
-        // 稳定态下这里只做**只读**判断（IsWindow / GetParent），不产生任何写操作。
+        // 稳定态下这里只做**只读**判断（IsWindow / GetAncestor），不产生任何写操作。
         // 拔掉一台显示器后 `available_monitors()` 变短、下标整体漂移
         // （原本的 2 号屏变成 1 号），"已就位"的窗口几何随之失效 ——
         // 由上面的 `layout_changed` 捕获并纠正。
@@ -661,15 +743,16 @@ fn spawn_relink_watcher(app: tauri::AppHandle) {
                 continue;
             };
 
-            // ---- 只读校验：**唯一可靠且零副作用的信号是"父窗口句柄还有效"** ----
-            // 刻意**不**比对"父窗口 == 本次找到的 WorkerW"。那个比较要求
-            // 两次独立查找（挂载时那次、巡检这次）返回同一个句柄，一旦不一致
-            // （explorer 重建过、机器上同时存在多个 WorkerW）就会**每轮**都判定
-            // "脱挂"并重挂 → SetParent + SetWindowPos 每 4s 一次 → 周期性闪屏。
-            // 父窗口被销毁时句柄自然失效，那才是真正需要重挂的时机。
-            let cur_parent = unsafe { GetParent(hwnd).unwrap_or(HWND::default()) };
-            let still_attached =
-                !cur_parent.0.is_null() && unsafe { IsWindow(cur_parent) }.as_bool();
+            // ---- 只读校验：**判据必须是 `GetAncestor(GA_PARENT)`，不是 `GetParent`** ----
+            // `GetParent` 对这种"无 WS_CHILD 的 overlapped 窗口"恒返回 NULL，
+            // 用它判定会让巡检**每轮都以为脱挂**、每 4s 重挂一次 → 周期性闪屏。
+            // 详见 `real_parent` / `is_attached_to_desktop` 的注释。
+            //
+            // 同样刻意**不**比对"父窗口 == 本次找到的 WorkerW"：那要求两次独立查找
+            // 返回同一个句柄，一旦不一致（explorer 重建过、机器上同时存在多个 WorkerW）
+            // 就会每轮判定脱挂。只看"父窗口有效且不是桌面窗口"。
+            let cur_parent = real_parent(hwnd);
+            let still_attached = is_attached_to_desktop(hwnd);
 
             if still_attached {
                 // 只在两种情况下比几何：① 显示器配置变了（插拔屏后下标漂移，
@@ -704,6 +787,10 @@ fn spawn_relink_watcher(app: tauri::AppHandle) {
         // 热插拔补齐（插屏）：对**选中且在播放**的显示器补建缺失窗口。
         // 与上面的"拔屏关闭"是一对：下标只按当前 `available_monitors()` 的长度算，
         // 所以插屏后新下标自然进入 targets_of、被建窗；拔屏后越界下标被上面关掉。
+        // 热插拔补齐（插屏）+ 自愈：对**选中且在播放**的显示器，确保窗口存在、
+        // 已挂到桌面层、且摆在该显示器的位置上。
+        // 与上面的"拔屏关闭"是一对：下标只按当前 `available_monitors()` 的长度算，
+        // 所以插屏后新下标自然进入 targets_of、被建窗；拔屏后越界下标被上面关掉。
         let cur = state().lock().unwrap().clone();
         if cur.enabled && !cur.path.is_empty() {
             for mi in targets_of(&cur, monitors.len()) {
@@ -712,32 +799,47 @@ fn spawn_relink_watcher(app: tauri::AppHandle) {
                 // 快照是进入本轮时克隆的，而校验环节可能刚把死窗口的句柄置 0；
                 // 用快照会漏掉这次置 0，导致该重建的窗口本轮不重建。
                 let recorded = watch_hwnds().lock().unwrap().get(mi).copied().unwrap_or(0);
-                let missing = app.get_webview_window(&label).is_none() || recorded == 0;
-                if !missing {
+
+                let Some(win) = app.get_webview_window(&label) else {
+                    // Tauri 侧没有这个窗口 → 建一个。`create_video_window` 会在
+                    // 页面加载完成后调 `setup_window` 完成挂载与摆位。
+                    if let Err(e) = create_video_window(&app, mi) {
+                        note_create_error(format!("补建动态壁纸窗口失败（显示器 {mi}）：{e}"));
+                    }
+                    continue;
+                };
+
+                // Tauri 侧还留着窗口对象：**先确认它的原生窗口是否还活着**。
+                // 直接问句柄，比"登记句柄为 0"可靠 —— 登记为 0 也可能只是
+                // `on_page_load` 还没跑到（窗口刚建完），那种情况绝不能关掉重建，
+                // 否则会退化成每 4s 关一次建一次 → 一直闪。
+                let native = win.hwnd().ok().map(|h| HWND(h.0));
+                let alive = native.map(|h| unsafe { IsWindow(h) }.as_bool()).unwrap_or(false);
+
+                if !alive {
+                    // 原生窗口已被销毁（explorer 重启会连带销毁子窗口）：
+                    // 先 `destroy()` 释放 label，**本轮不再重建** ——
+                    // `destroy()` 到 label 真正可复用之间仍是异步的，同一轮立刻重建会
+                    // 因 label 重名而失败；而失败若被忽略，表现就是"永远建不出来"。
+                    // 下一轮补齐自然会把它建起来（最坏晚 4s，但一定成功）。
+                    let _ = win.destroy();
                     continue;
                 }
-                match app.get_webview_window(&label) {
-                    // Tauri 侧没有这个窗口 → 直接建
-                    None => {
-                        let _ = create_video_window(&app, mi);
-                    }
-                    // Tauri 侧还留着窗口对象：**先确认它的原生窗口是否还活着**。
-                    // 直接问句柄，比"登记句柄为 0"可靠 —— 登记为 0 也可能只是
-                    // `on_page_load` 还没跑到（窗口刚建完），那种情况绝不能关掉重建，
-                    // 否则会退化成每 4s 关一次建一次 → 一直闪。
-                    Some(win) => {
-                        let alive = win
-                            .hwnd()
-                            .map(|h| unsafe { IsWindow(HWND(h.0)) }.as_bool())
-                            .unwrap_or(false);
-                        if !alive {
-                            // 原生窗口已被销毁（explorer 重启会连带销毁子窗口）：
-                            // 必须先 close() 释放 label，否则 create_video_window 会因
-                            // label 重名而失败 —— 表现为"重启 explorer 后动态壁纸再也
-                            // 回不来"，且每轮都白试一次。
-                            let _ = win.close();
-                            let _ = create_video_window(&app, mi);
+
+                // 窗口活着、但登记句柄为 0 → 说明 `on_page_load` 里那套"挂载 + 摆位"
+                // 没走完（页面加载失败，或当时拿不到显示器几何）。这里补做一遍。
+                //
+                // **早期写法在这里什么都不做**，于是这类窗口永远停在"未挂载 / 未摆位"
+                // 状态，用户看到的就是"新插上的显示器上没有壁纸"。
+                // 用只读查找（`allow_spawn = false`）：巡检绝不能发 0x052C。
+                if recorded == 0 {
+                    let hwnd = native.unwrap();
+                    if setup_window(&app, hwnd, mi, false) {
+                        let mut v = watch_hwnds().lock().unwrap();
+                        if v.len() <= mi {
+                            v.resize(mi + 1, 0);
                         }
+                        v[mi] = hwnd.0 as isize;
                     }
                 }
             }
@@ -802,7 +904,11 @@ fn close_window_at(app: &tauri::AppHandle, index: usize, hwnd: isize) {
         unmark_settled(hwnd);
     }
     if let Some(win) = app.get_webview_window(&window_label_for(index)) {
-        let _ = win.close();
+        // 用 `destroy()` 而不是 `close()`：这两个窗口是后端自己创建的，
+        // 不需要走"关闭请求"那套握手（`on_window_event` 里也明确放行了非 main 窗口），
+        // 直接销毁能更快释放 label。**不要在同一次调用里紧接着重建同名窗口** ——
+        // 释放仍是异步的，撞名会让重建失败（调用方据此把重建推到下一轮）。
+        let _ = win.destroy();
     }
     let mut v = watch_hwnds().lock().unwrap();
     if index < v.len() {
@@ -823,7 +929,11 @@ fn close_all_video_windows(app: &tauri::AppHandle) {
     let upper = recorded.max(monitor_count);
     for i in 0..upper {
         if let Some(win) = app.get_webview_window(&window_label_for(i)) {
-            let _ = win.close();
+            // 与 `close_window_at` 用同一个销毁方式：走 `destroy()` 而不是
+            // `close()`。这两个窗口是后端自己创建的，不需要"关闭请求"那套握手，
+            // 而且 `close()` 的异步释放会让**紧接着的"重新启用"**撞上 label 重名
+            // —— 表现为"停止动态壁纸后马上再启用，起不来"。
+            let _ = win.destroy();
         }
     }
     // 清理注册表与就位标记，保证下次启用能重新挂载
@@ -1099,6 +1209,49 @@ pub async fn list_monitors(app: tauri::AppHandle) -> Result<Vec<MonitorInfo>, St
     Ok(list)
 }
 
+/// 把**已存在**的置底窗口挂到桌面层、摆到第 index 台显示器上，成功返回 true。
+///
+/// **成功 = 挂载成功 且 几何已应用**。任一环节失败都返回 false，
+/// 调用方据此决定"要不要登记句柄 / 标记就位"。这一点是本函数的全部意义：
+/// 只有**真正就位**的窗口才能进 `SETTLED`，否则巡检会以为它没问题、永远不再校正 ——
+/// 症状正是"新插上的显示器上壁纸不出现（或位置不对）且再也不恢复"。
+///
+/// 早期 `on_page_load` 里是"无条件 `mark_settled` + 无条件登记句柄"，
+/// 于是挂载失败或拿不到显示器几何时也会被当成已就位，永久失去自愈能力。
+///
+/// `allow_spawn` 只在**首次**挂载时为 true（允许发 `WM_SPAWN_WORKERW` 生成桌面层）；
+/// 重试路径一律 false —— 巡检里发那条消息会让整个桌面重排 → 整屏闪。
+fn setup_window(app: &tauri::AppHandle, hwnd: HWND, index: usize, allow_spawn: bool) -> bool {
+    // 已经挂在桌面层上就**直接用当前父窗口**，绝不再走一次查找 + SetParent：
+    // 重复 SetParent 会重建绘制表面（闪屏），而"再找一次 WorkerW"还可能因为
+    // 机器上存在多个 WorkerW 而返回另一个句柄 → 白白重挂一次。
+    //
+    // 判据是 `is_attached_to_desktop`（内部用 `GetAncestor(GA_PARENT)`），
+    // **不是 `GetParent`** —— 后者对本窗口恒返回 NULL，会让这里每次都白挂一次。
+    let cur_parent = real_parent(hwnd);
+    let parent = if is_attached_to_desktop(hwnd) {
+        cur_parent
+    } else {
+        match attach_to_desktop(hwnd, allow_spawn) {
+            Some(p) => p,
+            None => return false,
+        }
+    };
+
+    let monitors = app.available_monitors().unwrap_or_default();
+    let Some(mon) = monitors.get(index) else {
+        // 拿不到这台显示器的几何（列表刚变过 / 索引已越界）：不算就位，
+        // 留给下一轮巡检重试 —— 但**不关窗口**，下一轮通常就能取到。
+        return false;
+    };
+    let Some(geo) = monitor_geo(app, mon, parent) else {
+        return false;
+    };
+    apply_geo_if_changed(hwnd, geo, parent);
+    mark_settled(hwnd);
+    true
+}
+
 /// 创建第 index 个显示器上的动态壁纸窗口
 fn create_video_window(app: &tauri::AppHandle, index: usize) -> Result<(), String> {
     let label = window_label_for(index);
@@ -1126,38 +1279,36 @@ fn create_video_window(app: &tauri::AppHandle, index: usize) -> Result<(), Strin
             if let Ok(tauri_hwnd) = window.hwnd() {
                 let hwnd = HWND(tauri_hwnd.0);
                 set_no_activate(hwnd);
-                // 先挂载拿到 WorkerW，再按"本窗口对应的显示器"摆放。
+                // 挂载 + 摆位都完成后才登记句柄、标记就位。
                 // `allow_spawn = true`：这是首次挂载，桌面层可能还不存在，
                 // 允许发送 WM_SPAWN_WORKERW 把它生出来（只此一处允许）。
-                if let Some(parent) = attach_to_desktop(hwnd, true) {
-                    let monitors = app_for_cb.available_monitors().unwrap_or_default();
-                    if let Some(mon) = monitors.get(index_for_cb) {
-                        if let Some(geo) = monitor_geo(&app_for_cb, mon, parent) {
-                            apply_geo_if_changed(hwnd, geo, parent);
+                //
+                // **登记句柄也必须以成功为前提**：登记表是巡检的"这个窗口存在且已就位"
+                // 依据，给一个没挂上的窗口登记非 0 句柄，巡检就再也不会去补挂它。
+                if setup_window(&app_for_cb, hwnd, index_for_cb, true) {
+                    // 记录句柄（按 label 序号位置写入，供巡检线程按序号取用）
+                    if let Some(idx) = label_for_cb
+                        .rsplit('-')
+                        .next()
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
+                        let mut v = watch_hwnds().lock().unwrap();
+                        if v.len() <= idx {
+                            v.resize(idx + 1, 0);
                         }
+                        v[idx] = hwnd.0 as isize;
                     }
-                    // 挂载 + 摆位都完成后标记就位，巡检线程此后不再触碰本窗口
-                    mark_settled(hwnd);
                 }
-                // 记录句柄（按 label 序号位置写入，供巡检线程按序号取用）
-                if let Some(idx) = label_for_cb
-                    .rsplit('-')
-                    .next()
-                    .and_then(|s| s.parse::<usize>().ok())
-                {
-                    let mut v = watch_hwnds().lock().unwrap();
-                    if v.len() <= idx {
-                        v.resize(idx + 1, 0);
-                    }
-                    v[idx] = hwnd.0 as isize;
-                }
-                // 只在**尚未挂到桌面层**时才 show()。
-                // 已挂到 WorkerW 后再调 show() 会让 Windows 重建绘制表面 → 视频闪一下；
-                // 且挂载后的窗口本就随桌面层显示，无需再 show。
-                let already_attached = unsafe {
-                    !GetParent(hwnd).unwrap_or(HWND::default()).0.is_null()
-                };
-                if !already_attached {
+                // **显示与否必须单独判断，不能用"父窗口是否为空"代替。**
+                // 挂载（SetParent）与显示（WS_VISIBLE）是两件独立的事：挂到 WorkerW
+                // 下并不会让窗口可见。窗口创建时是 `visible(false)`，所以首次必须
+                // `show()` 一次；之后页面若再次加载就不该再调 —— `show()` 会重建
+                // 绘制表面，正在播的视频会闪一下。
+                //
+                // 历史写法是 `let already_attached = !GetParent(hwnd).is_null();`
+                // 而 `GetParent` 对本窗口恒返回 NULL，于是**每次页面加载都会
+                // 多调一次 `show()`**（多一次闪屏），且判据本身是错的。
+                if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
                     let _ = window.show();
                 }
             }

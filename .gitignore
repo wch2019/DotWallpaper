@@ -32,3 +32,9 @@ src-tauri/gen
 
 # Development certificate
 src-tauri/devcert.pfx
+
+# Vite 依赖预构建缓存
+ui/.vite/
+
+# AI 协作工作目录：含探针采样数据 / 桌面截图等大文件，禁止提交
+.workbuddy-ai/

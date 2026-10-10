@@ -7,10 +7,21 @@
 //   1) HTML5 的 loop 属性在回到开头时会重新 seek 并解码，循环点几乎必然掉帧或闪黑；
 //   2) 单元素"提前 seek 到 0"也只是把这次 seek 提前，仍会丢几帧 —— 表现为
 //      "循环点画面一顿"；
-//   3) 真正无感的方式是**双实例交叉播放**：两个 <video> 交替承担播放，
-//      当 A 接近结尾时唤醒已预载好的 B 从 0 开始播放，两者交叉淡入淡出，
-//      切换瞬间画面始终有内容，观感上完全连续。
+//   3) 真正无感的方式是**双实例预载 + 淡出**：两个 <video> 上下叠放，下层始终
+//      停在 0 帧且保持**不透明**（被上层完整盖住，看不见），上层接近结尾时下层
+//      起播、同时把上层淡出。合成结果 = (1-α)·上层 + α·下层，**两层永远都有
+//      画面，物理上不可能露出黑底**。
 //   本文件采用方案 3，并在 WebView2 不支持交叉时回退到单元素回绕（方案 2）。
+//
+// 【交叉点闪屏的根因（CDP 探针实测，勿再猜）】
+//   "每播放一个循环闪一次，有时候不闪" = **被盖住的下层被合成器遮挡裁剪了**。
+//   Chromium 会把"被不透明层完全覆盖"的层裁掉不画，于是下层的视频帧根本没被
+//   提交；等上层开始淡出、下层突然需要出画时，它还要 1~2 帧才被恢复提交 ——
+//   这段空窗里合成结果退化成 `α·上层`（下面是空的/黑底），**整屏按 α 等比压暗**。
+//   探针实测（用户真实视频，4×4 空间指纹）交叉点那一帧 16 格全部同比例掉到 ~0.90
+//   （83.6 → 75.4），是"整体变暗"而不是"内容变了"。掉多少取决于下层几帧恢复：
+//   有时只掉 2%（几乎看不出）→ 这就是"有时候不闪"。
+//   修法见 `TOP_OPACITY`：**别让覆盖层恰好是 opacity: 1**。
 import { onMounted, onUnmounted, ref } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -23,7 +34,7 @@ const hintVisible = ref(true);
 const muted = ref(false);
 /// 是否暂停：暂停时冻结当前帧（不销毁窗口、不回退到静态壁纸），恢复时从原处继续
 const paused = ref(false);
-/// 两个交替播放的视频元素
+/// 两个上下叠放、交替承担播放的视频元素
 const videoA = ref<HTMLVideoElement | null>(null);
 const videoB = ref<HTMLVideoElement | null>(null);
 
@@ -31,42 +42,74 @@ let unlisten: UnlistenFn | null = null;
 let hintTimer: number | undefined;
 /// 主循环定时器（交叉检测）
 let loopTimer: number | undefined;
-/// 交叉淡入的收尾定时器（淡入走完后隐藏旧前台）。
+/// 交叉收尾定时器。
 /// **必须可取消**：换源时若不清掉，它会在约 460ms 后去改一个已经换过角色的元素。
 /// 目前换源会重建 `<video>`（`v-if`）使旧引用变成游离节点，所以实际不会出问题 ——
 /// 但那是"靠副作用兜底"，不该依赖。换源路径显式取消它。
 let crossTimer: number | undefined;
-/// 当前正在"前台"显示的元素索引（0=A, 1=B）
+/// 是否正在交叉（上层淡出中）。挡住 `crossStep` 的重复触发 ——
+/// 淡出期间 `front` **还没切换**，不挡的话每 25ms 就会再触发一次交叉。
+let crossing = false;
+/// 当前"可见层"（两层中在上面、正在播的那个）索引，0=A / 1=B
 let front = 0;
 /// 当前生效的视频地址（判断是否需要重置）
 let currentSrc = "";
-/// 单调递增的 z-index 计数器。
+/// 单调递增的 z-index 计数器，见 `finishCross` 的注释。
 ///
-/// **绝不能用固定的 1/2**：交叉结束后旧前台仍保留着自己的 z-index，
-/// 下一次交叉若把新前台也设成同一个值，二者 z-index 相等，
-/// 绘制顺序就退化成 DOM 顺序 —— 而 DOM 里 B 永远在 A 之后，
-/// 于是"永远 B 压 A"：当 A 才是要淡入的新前台时，画面变成
-/// 旧帧压在新帧上面淡出，方向和亮度全反了。症状是**每隔一次交叉就出问题**。
-/// 每次交叉取一个更大的值，才能保证"新前台一定在最上层"。
+/// **绝不能用固定的 1/2**：退场层仍保留着自己的 z-index，下一次交叉若把新的
+/// 可见层也设成同一个值，二者 z-index 相等 → 绘制顺序退化成 DOM 顺序，
+/// 而 DOM 里 B 永远在 A 之后 → "永远 B 压 A"：当 A 才是要升上来的那层时，
+/// 画面方向就反了。每次取一个更大的值，才能保证"新可见层一定在最上层"。
 /// 长期运行这个值会一直涨（10s 的片子一天约 8600），但 z-index 是 32 位整数、
 /// 且只有两个元素 —— **不要为此加"归一化回收"逻辑**：归一化本身要在播放中改
 /// z-index，为了一个永远不会溢出的计数器去动正在显示的层，得不偿失。
 let zCounter = 2;
-/// 交叉点提前量（秒）。
-///
-/// **必须明显大于 `CROSS_FADE_SECS`**：旧前台在淡入走完之前不能播到结尾，
-/// 否则它会在仍然可见的时候冻在最后一帧，与新画面混在一起 → 看着像卡了一下。
-/// 但也不能太大：新元素是从 0 开始播的，两层内容相差正好一个提前量，
-/// 太大就成了"重影"。所以取"略大于淡入时长 + 一个轮询周期"。
-const CROSS_LEAD_SECS = 0.5;
-/// 交叉淡入时长（秒）
-const CROSS_FADE_SECS = 0.4;
-/// 交叉检测的轮询周期（毫秒）。
-/// 越短，实际提前量越贴近 `CROSS_LEAD_SECS`（抖动越小）；
-/// 它和上面两个常量是绑定的 —— `lead - fade` 必须能吃掉一个轮询周期的抖动。
-const CROSS_POLL_MS = 25;
 /// 是否已启用交叉循环（元数据就绪后确定）
 let crossEnabled = false;
+
+/// 交叉点提前量与淡出时长的**上限**（秒）。
+///
+/// 实际值按视频时长算（见 `onLoadedMetadata`）—— 短片子必须按比例缩小，
+/// 否则 `lead` 会占掉整段视频的一大半。
+///
+/// 两个约束（改一个就要重算另一个）：
+/// - **`lead` 必须明显大于 `fade`**：上层在淡出走完之前不能播到结尾，
+///   否则它会冻在最后一帧、与新画面混在一起 → 看着像卡了一下。
+/// - 也不能太大：下层是从 0 起播的，两层内容相差正好一个 `lead`，太大就成了"重影"。
+const CROSS_LEAD_MAX = 0.5;
+const CROSS_FADE_MAX = 0.4;
+/// 交叉检测的轮询周期（毫秒）。
+/// 越短，实际提前量越贴近 `lead`（抖动越小）；
+/// 它和上面两个常量是绑定的 —— `lead - fade` 必须能吃掉一个轮询周期的抖动。
+const CROSS_POLL_MS = 25;
+/// 回退方案（交叉不可用）单元素提前回绕的提前量（秒）
+const WRAP_LEAD_SECS = 0.28;
+/// 预载层迟迟不就绪时，从"上层已播到结尾"起最多再等多久，超时就兜底回绕。
+/// 只是防"永久冻帧"的安全网，正常路径永远走不到（预载层有一整圈的时间去就绪）。
+const CROSS_STALL_RESCUE_MS = 800;
+/// 上面那个安全网的计时起点（0 = 未在计时）
+let stallSince = 0;
+
+/// 本片实际使用的提前量 / 淡出时长（`onLoadedMetadata` 里按 duration 定）
+let crossLead = CROSS_LEAD_MAX;
+let crossFade = CROSS_FADE_MAX;
+
+/// **上层（负责覆盖的那层）的 opacity。绝不能是 `1`。**
+///
+/// Chromium 的遮挡裁剪（occlusion culling）会把"被**不透明**层完全覆盖"的层
+/// 直接跳过不画。上层写 `opacity: 1` 时它就是不透明层 → 下层被裁掉 → 下层的
+/// 视频帧不被提交。等上层开始淡出、下层需要出画时，合成器要 1~2 帧才把它恢复，
+/// 这段空窗里合成结果 = `α·上层`（下层贡献为 0）→ **整屏等比压暗一下**。
+/// 探针实测：交叉点那一帧 16 格全部同比例掉到 ~0.90，掉多少取决于恢复快慢 ——
+/// 恢复快就只掉 2%（看不出），于是表现为"**每循环闪一次，有时候不闪**"。
+///
+/// 只要**不是恰好 1**，这层就不算"不透明层"，下面的层就永远不会被裁掉。
+/// 取 0.999（透出量 0.1%，肉眼不可见）：既要足够小于 1 躲开 `IsOpaque()`
+/// 的精确比较，又要足够接近 1 让平时看不出来。
+///
+/// ⚠️ **不要"顺手"把它改成 1。** 那不是清洁化，是把闪屏放回来。
+/// ⚠️ 也不要改成 0.99 之类更大的值 —— 没必要，透出量越大越可能被看出来。
+const TOP_OPACITY = "0.999";
 
 function elOf(i: number): HTMLVideoElement | null {
   return (i === 0 ? videoA.value : videoB.value) ?? null;
@@ -87,7 +130,21 @@ function tryPlay(el: HTMLVideoElement | null) {
   });
 }
 
-/// 复位到"单元素前台"状态：A 显示并播放，B 隐藏备用
+/// 复位到"初始叠放"状态：A 在上（可见、待播），B 在下（预载、停在 0 帧）。
+///
+/// **两层都必须是"看得见画面"的**（上层 `TOP_OPACITY`、下层 `1`）：
+/// 下层被上层完整盖住、看不见，但它因此**始终参与合成**、视频帧始终有效 ——
+/// 交叉时立刻就有画面可混。
+///
+/// 曾经的做法是"下层 `opacity: 0`，交叉时把它淡入"。**那是本 bug 的根源**：
+/// 透明层里的视频帧不一定被合成器提交（可能被裁剪掉），淡入时它会先露出
+/// 几帧空白，于是合成结果退化成 `(1-α)·旧层` —— **每个循环点整屏往黑里沉
+/// 一下再回来**，也就是"每播放一个循环闪一次"。用 `requestVideoFrameCallback`
+/// 等帧只能赌它什么时候回调，赌不中就闪 —— 所以"有时候不闪"。
+///
+/// ⚠️ 改完之后还剩**同一个洞的另一半**：上层写 `opacity: 1` 就成了"不透明层"，
+/// 于是**下层被遮挡裁剪**、帧同样不被提交 —— 症状一模一样。详见 `TOP_OPACITY`。
+/// 所以这里上层写的是 `TOP_OPACITY` 而**不是** `"1"`。
 function resetElements() {
   const a = elOf(0);
   const b = elOf(1);
@@ -100,76 +157,144 @@ function resetElements() {
     // 复位时清掉过渡：换源/重载后不需要任何动画，残留的 transition
     // 会让"瞬间切到初始态"变成一次可见的淡入。
     el.style.transition = "none";
-    el.style.opacity = i === 0 ? "1" : "0";
-    el.style.zIndex = i === 0 ? "1" : "0";
+    // 上层 0.999（不能是 1，理由见 TOP_OPACITY）；下层 1（它在最底下，无人覆盖）
+    el.style.opacity = i === 0 ? TOP_OPACITY : "1";
+    el.style.zIndex = i === 0 ? "2" : "1";
   }
   front = 0;
   zCounter = 2;
+  crossing = false;
+  stallSince = 0;
 }
 
-/// 双实例交叉循环：检测前台元素是否接近结尾，是则把后台元素拉到 0 播放并淡入。
+/// 双实例交叉循环：上层接近结尾时，下层从 0 起播、同时把上层淡出。
 ///
-/// **只淡入新前台，绝不淡出旧前台**（这是本函数的核心，改动前请先读注释）：
-/// 旧实现让两层同时过渡（旧 1→0、新 0→1），而新层在上。带 alpha 的两层
-/// 叠加合成出来的不是线性交叉：
-///     结果 = α·新 + (1-α)·[(1-α)·旧] = α·新 + (1-α)²·旧
-/// α=0.5 时整体亮度只剩约 **75%** —— 每个循环点整屏往黑里沉一下再回来。
-/// 用户对它的描述正是"闪屏 + 循环不连贯"，而这两句说的是同一件事。
-/// 让旧层保持完全不透明垫在下面、只淡入新层，才是真正的线性交叉：
-///     结果 = α·新 + (1-α)·旧      （亮度恒定，无色偏、无明暗跳变）
+/// **核心是"上层淡出、下层始终有画面"**（改动前请先读注释）：
+/// 下层在交叉前就已经停在 0 帧并显示着它，两层都参与合成，所以
+///     结果 = (1-α)·上层 + α·下层
+/// 是真正的线性交叉：亮度恒定、无色偏、**任何时刻都不会露出黑底**。
+///
+/// 这个洞**被堵了两次**，两次症状完全一样（每循环闪一次 / 有时候不闪），
+/// 但机理是同一个洞的两半 —— **"需要出画的那层，帧没被提交"**：
+/// - 前半：下层写 `opacity: 0` → 透明层被跳过不画 → 帧没提交。
+///   修法：下层写 `1`。
+/// - 后半：上层写 `opacity: 1` → 它成了不透明层 → **下层被遮挡裁剪** → 帧没提交。
+///   修法：上层写 `TOP_OPACITY`（0.999）。探针实测过，这才是"有时候不闪"的
+///   那个时有时无的来源：掉多少取决于合成器几帧恢复，恢复快就只掉 2%。
+///
+/// **另一个坑（CDP 探针实测）**：交叉点上**不要**再 seek 一次下层。
+/// 把 `currentTime` 设成"与当前相同"的值，Chrome 仍会执行一次真实 seek：
+/// `readyState` 立刻掉到 1、`seeking` 变 true，紧随其后的 `play()` 要等 seek
+/// 完成才真正开始推进 —— 淡出的头 100ms（片子越大越久）新层冻在第 0 帧不动，
+/// 观感是"**画面卡一下 / 跳一下**"。复位只在 `finishCross` 里做，
+/// 那里离下次交叉还有一整圈的时间，seek 是异步完成的、完全不影响画面。
 function crossStep() {
-  // 暂停时不推进循环：此时 currentTime 本就不动，但交叉淡入的定时器与
+  // 暂停时不推进循环：此时 currentTime 本就不动，但交叉淡出的定时器与
   // `front` 指针不该在冻结期间被改动，显式挡掉最稳妥。
   if (paused.value) return;
-  const cur = elOf(front);
-  const next = elOf(1 - front);
+  // 上一次交叉还在淡出：`front` 尚未切换，不能重复触发
+  if (crossing) return;
+  const cur = elOf(front); // 可见层（在上，正在播）
+  const next = elOf(1 - front); // 预载层（在下，停在 0 帧）
   if (!cur || !next) return;
 
   const d = cur.duration;
   if (!Number.isFinite(d) || d <= 0) return;
 
   // 还有足够剩余时间就什么都不做
-  if (cur.currentTime < d - CROSS_LEAD_SECS) return;
+  if (cur.currentTime < d - crossLead) return;
 
-  // 后台元素准备好并从头播放
-  try {
-    next.currentTime = 0;
-  } catch {
-    /* 忽略：部分编码不支持精确 seek，仍可继续 */
+  // 预载层还没拿到数据 → 本轮不交叉，下一轮 25ms 后重试（条件恢复后自愈）。
+  //
+  // **不要在这里立刻退化调 `wrapStep()`**：那会对**正在显示的那层**做 seek，
+  // 实测就是一次瞬时的内容跳变（整屏亮度 10ms 内从 239 跳到 16）——
+  // 正是要修的症状。宁可让上层冻在末帧等下一轮，也不要制造一次跳变。
+  //
+  // 但"等"必须**有上限**：预载层整个循环都没就绪时（文件被删/解码失败），
+  // 上层会播到结尾停住 —— 画面永久冻在最后一帧，比顿一下严重得多。
+  // 所以只在上层**真的已经播到结尾**之后才开始计时，超时就兜底回绕一次。
+  if (next.readyState < 2 /* HAVE_CURRENT_DATA */) {
+    if (cur.currentTime >= d - 0.02) {
+      if (stallSince === 0) stallSince = performance.now();
+      else if (performance.now() - stallSince > CROSS_STALL_RESCUE_MS) {
+        stallSince = 0;
+        wrapStep();
+      }
+    }
+    return;
+  }
+  stallSince = 0;
+
+  // ⚠️ **不要在交叉点 seek 下层。**
+  //
+  // 下层在 `finishCross` 里就已经被复位到 0 帧，那之后它有一整圈的时间去完成
+  // 这次 seek —— 到这里 `currentTime` 已经是 0 了。而把 `currentTime` 设成
+  // **与当前相同**的值，Chrome 仍然会执行一次**真实 seek**：
+  // 实测（CDP 探针）设之前 `readyState=4 / seeking=false`，设之后立刻变成
+  // `readyState=1 / seeking=true`。于是紧随其后的 `play()` 必须等 seek 完成
+  // 才真正开始推进 —— 淡出的头 100ms（片子越大越久）里新层**冻在第 0 帧不动**，
+  // 观感就是"**画面卡一下 / 跳一下**"。
+  // 这个 seek 是纯粹的自伤：它没有换来任何正确性，只把一次异步操作搬到了
+  // 最关键的那 400ms 上。只在真的偏了才纠正（正常情况不会走到）。
+  if (next.currentTime > 0.02) {
+    try {
+      next.currentTime = 0;
+    } catch {
+      /* 忽略：部分编码不支持精确 seek，仍可继续 */
+    }
   }
   tryPlay(next);
 
-  const fadeMs = Math.round(CROSS_FADE_SECS * 1000);
-  // 新前台升到最上层（取一个比任何现存层都大的值，见 zCounter 注释）并淡入。
-  next.style.transition = `opacity ${fadeMs}ms linear`;
-  next.style.zIndex = String(++zCounter);
-  next.style.opacity = "1";
+  // ② 上层淡出，露出下面那层（`opacity: 1`，且因为上层只有 `TOP_OPACITY`
+  //    而**没有被遮挡裁剪**，帧一直是提交着的）。
+  //    合成结果 = (1-α)·上层 + α·下层 —— 线性、亮度恒定、不会往黑里沉。
+  crossing = true;
+  const fadeMs = Math.round(crossFade * 1000);
+  cur.style.transition = `opacity ${fadeMs}ms linear`;
+  cur.style.opacity = "0";
 
-  // 旧前台**保持 opacity 1**，只是被压在下层 —— 不要给它写 opacity。
-  const oldEl = cur;
-
-  // 淡入走完后：旧层已完全被不透明的上层盖住，此时再隐藏它不会有任何可见变化。
+  // ③ 收尾：把角色对调（退场层复位成"下层预载"）。
+  //    这个定时器**提前或延后都无害**：退场层此刻已经被夹在**不透明的**下层
+  //    下面，它是什么透明度都看不见 —— 这是本方案比"淡入 + 固定延时硬切"稳的地方。
   if (crossTimer !== undefined) window.clearTimeout(crossTimer);
   crossTimer = window.setTimeout(() => {
     crossTimer = undefined;
-    try {
-      oldEl.pause();
-      oldEl.currentTime = 0;
-    } catch {
-      /* ignore */
-    }
-    // 先把过渡清掉再改 opacity，否则它会花 fadeMs 再淡出一次
-    // （虽然被盖住看不见，但会给下一次交叉留下一个"正在过渡"的状态）。
-    oldEl.style.transition = "none";
-    oldEl.style.opacity = "0";
-    oldEl.style.zIndex = "0";
+    finishCross(cur, next);
   }, fadeMs + 60);
+}
 
+/// 交叉收尾：把刚退场的层复位成"下层预载"，并把角色对调。
+function finishCross(cur: HTMLVideoElement, next: HTMLVideoElement) {
+  if (!crossing) return;
+  crossing = false;
+  // **这里是全流程中唯一一次 seek，而且是刻意的。**
+  // 退场层要退回 0 帧，好在下一次交叉时充当预载层；它现在被夹在上层（`TOP_OPACITY`）
+  // 下面（不可见），而且距离下次交叉还有一整圈（≈ 视频时长）——
+  // seek 有充足的时间异步完成。实测下一轮交叉时它确实已经是
+  // `currentTime=0 / readyState=4 / seeking=false`。
+  // 交叉点上**不要**再补一次 seek（见 `crossStep` 的注释：那是自伤）。
+  try {
+    cur.pause();
+    cur.currentTime = 0;
+  } catch {
+    /* ignore */
+  }
+  // 预载层升到最上，成为新的可见层。此刻 `cur` 已被淡到 0，
+  // 所以这次 z 变化在视觉上不可见（这正是铁律 ④ 允许"提前/延后都无害"的原因）。
+  next.style.transition = "none";
+  next.style.zIndex = String(++zCounter);
+  // 新上层要落到 `TOP_OPACITY`（**不是 1**）—— 它马上要盖住下面那层，
+  // 保持 1 会把下面那层遮挡裁剪掉，下一次交叉就又闪（见 `TOP_OPACITY`）。
+  next.style.opacity = TOP_OPACITY;
+  // 退场层复位成"下层预载"：先清过渡再恢复不透明，否则它会花 fadeMs
+  // 再淡回来（虽然被盖住看不见，但会给下一次交叉留下一个"正在过渡"的状态）。
+  // 它在 `TOP_OPACITY` 的 `next` 下面，这一步同样不可见。
+  cur.style.transition = "none";
+  cur.style.opacity = "1";
   front = 1 - front;
 }
 
 /// 回退方案：单元素提前回绕（交叉循环不可用时）
-const WRAP_LEAD_SECS = 0.28;
 let wrapHandler: (() => void) | null = null;
 function wrapStep() {
   if (paused.value) return;
@@ -212,6 +337,8 @@ function stopLoop() {
     window.clearTimeout(crossTimer);
     crossTimer = undefined;
   }
+  crossing = false;
+  stallSince = 0;
   const a = elOf(0);
   if (a && wrapHandler) {
     a.removeEventListener("timeupdate", wrapHandler);
@@ -250,8 +377,21 @@ function onLoadedMetadata() {
   const b = elOf(1);
   if (!a) return;
   const d = a.duration;
-  // duration 过短（< 1.5s）时交叉循环收益不明显，直接用回绕更稳
-  crossEnabled = !!b && Number.isFinite(d) && d > 1.5;
+  // 交叉循环的几何约束是 `d - lead > fade`（上层在淡出走完之前不会播到结尾），
+  // 满足它的最短片子约 0.9s，取 1.0s 留一点余量。
+  //
+  // **门槛不要随手调回 1.5**：低于门槛会退化成单元素回绕，而那是一次
+  // **瞬时的内容跳变** —— 实测整屏亮度在 10ms 内从 239 直跳到 16，
+  // 正是用户报的"画面跳一下/卡一下"。交叉循环只要能跑就跑。
+  crossEnabled = !!b && Number.isFinite(d) && d > 1.0;
+  if (crossEnabled) {
+    // 短片子按比例缩小，否则 0.5s 的提前量会占掉整段视频的一大半。
+    crossLead = Math.min(CROSS_LEAD_MAX, d * 0.35);
+    crossFade = Math.min(CROSS_FADE_MAX, crossLead * 0.8);
+  } else {
+    crossLead = CROSS_LEAD_MAX;
+    crossFade = CROSS_FADE_MAX;
+  }
   resetElements();
   startLoop();
   if (!paused.value) tryPlay(a);
@@ -274,7 +414,7 @@ interface VideoState {
 ///
 /// 静音走模板上的 `:muted` 绑定（改 ref 即生效，元素不会被重建）；
 /// 暂停 / 恢复必须**显式**调 `pause()` / `play()` —— 这是命令式行为，绑定表达不了。
-/// 恢复时只播前台元素：后台那个是交叉循环的预载位，让它也播只是白耗解码。
+/// 恢复时只播可见层：下层是交叉循环的预载位，让它也播只是白耗解码。
 function applyPlayback() {
   if (paused.value) {
     elOf(0)?.pause();
@@ -310,8 +450,9 @@ function applyState(st: VideoState) {
 
 function onVideoError(e: Event) {
   const v = e.target as HTMLVideoElement;
-  // 只有前台元素报错才算失败，后台元素预载失败不影响前台播放
-  if (v && v.style.opacity === "0") return;
+  // 只有可见层报错才算失败：下层是预载位，它出错不影响当前画面
+  //（真到交叉时才会暴露，那时它已成为可见层）。
+  if (v === elOf(1 - front)) return;
   const code = v?.error?.code ?? -1;
   failed.value = true;
   errorMsg.value = `视频加载失败（错误码 ${code}）`;
@@ -333,6 +474,15 @@ async function stopWallpaper() {
 }
 
 onMounted(async () => {
+  // **页面根背景必须是黑的。**
+  // `styles/main.css` 里 `body { background: transparent }`，而 WebView2 的
+  // **默认窗口底色是白色** —— 画布透明时露出来的就是那层白。视频层任何一次
+  // 重排/重建合成表面（循环点正好是最频繁的时刻）只要有一帧没铺上，
+  // 露出来的就是**整屏白闪**，比黑闪刺眼得多。
+  // 这里在播放页自己把根背景刷黑（只在本窗口生效，主界面不受影响）。
+  document.documentElement.style.background = "#000";
+  document.body.style.background = "#000";
+
   hintTimer = window.setTimeout(() => (hintVisible.value = false), 3000);
   try {
     unlisten = await listen<VideoState>("video-wallpaper-state", (e) =>
@@ -376,7 +526,8 @@ onUnmounted(() => {
 <template>
   <div class="video-wall" @dblclick="stopWallpaper">
     <template v-if="src && !failed">
-      <!-- 双实例：A 为默认前台，B 为预载/交叉备用；两者地址相同。
+      <!-- 两层上下叠放，**都不透明**（见 resetElements 的注释）：
+           A 在上为可见层，B 在下为预载层（停在 0 帧，被 A 完整盖住）。
            **刻意不写 `autoplay` 属性**：它在 `src` 变化时会自动开播，
            而"暂停"必须能跨换源保持（用户暂停着换下一段视频，不该自己动起来）。
            起播一律由 JS 显式 `play()`，且都判过 `paused`。
@@ -425,6 +576,9 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  /* 两层都常驻合成层（`will-change` 只保证"有独立层"，**不保证不被遮挡裁剪**）：
+     被盖住的下层必须持续参与合成，否则交叉时它的视频帧还没被提交 → 闪。
+     保证这一点的真正手段是上层用 `TOP_OPACITY`（0.999）而不是 1 —— 见其注释。 */
   will-change: opacity;
 }
 .video-hint {
