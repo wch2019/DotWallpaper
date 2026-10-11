@@ -5,7 +5,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import type { Component } from "vue";
 import { NIcon, NInput, NSelect } from "naive-ui";
-import { AlertTriangle, Globe, Layers, Monitor, Play, Search, Star } from "lucide-vue-next";
+import { AlertTriangle, Check, Download, Globe, Layers, Monitor, Play, Search, Star } from "lucide-vue-next";
 import defaultJpg from '../assets/images/default.jpg'
 import { toast } from "../lib/naive-host";
 import {
@@ -208,6 +208,17 @@ function onItemDblClick(item: WallpaperItem) {
   void store.setItemAsDesktop(item);
 }
 
+// 卡片下方的显示名。必应下载下来的文件带标题（`迁飞路线上的生命`），
+// 本地/系统项则退回文件名。
+//
+// 卡片宽度是自适应的（`minmax(148px, 1fr)`），标题长一点就会截断 ——
+// 所以模板里把这个名字同时挂到 `title` 上，鼠标悬停能看到完整文字。
+// 两处**必须用同一个函数**：分开写两遍表达式，早晚会改歪一处
+//（曾把 `:alt` 留在旧写法上，结果 alt 与可见文字不一致）。
+function itemLabel(item: WallpaperItem): string {
+  return item.title || baseName(item.path || "") || "壁纸";
+}
+
 // 收藏星标状态
 function isFav(item: WallpaperItem) {
   return store.isFavorite(item.path);
@@ -223,6 +234,17 @@ function onToggleFav(item: WallpaperItem) {
 function onItemContext(e: MouseEvent, item: WallpaperItem) {
   e.preventDefault();
   store.openContextMenu(item, e.clientX, e.clientY);
+}
+
+// 必应卡片：只下载到本地壁纸目录，不改桌面。
+// `bingDownloadingDate` 是 store 级的（同一时刻只允许一个下载在跑），
+// 故按钮文案/禁用态都按它判断，而不是每张卡片各存一份状态。
+function isBingDownloading(item: WallpaperItem) {
+  return !!item.date && store.bingDownloadingDate === item.date;
+}
+
+function onDownloadBing(item: WallpaperItem) {
+  void store.downloadBingWallpaper(item);
 }
 
 // 滚动接近底部时触发加载更多
@@ -553,6 +575,44 @@ function onThumbLoad(e: Event) {
                 @error="handleImageError"
                 @load="onThumbLoad"
               />
+              <!-- 必应卡片「已下载」徽标：只出现在必应在线壁纸上（本地项不显示）。
+                   判据是"本地壁纸目录里能不能扫到这张"（store.isBingDownloaded），
+                   所以徽标亮着就一定能跳过去定位到，不会出现"标了却没有"。
+                   点击跳「本地」选项卡并按其日期过滤定位 —— 在线列表只有最近 16 天，
+                   超出窗口的老壁纸只能去本地找。 -->
+              <button
+                v-if="store.isBingDownloaded(item)"
+                class="downloaded-badge absolute left-1.5 top-1.5 z-[6] flex cursor-pointer items-center gap-1 rounded-md border border-white/10 bg-black/55 px-1.5 py-[2px] backdrop-blur-[2px] transition-colors duration-200 hover:border-white/25 hover:bg-black/70"
+                title="已下载到本地 · 点击在「本地」选项卡中查看"
+                @click.stop="store.openInLocal(item)"
+              >
+                <NIcon :component="Check" :size="10" class="text-ok" />
+                <span class="text-[9.5px] leading-none text-white/85">已下载</span>
+              </button>
+              <!-- 必应卡片「下载」：只把原图存到本地壁纸目录，**不改桌面**
+                   （用户明确要的路径：必应我只想下载）。
+                   放在右上角 —— 那正是收藏星标的位置，而必应项不显示星标，槽位空着。
+                   hover 浮现（动作类控件的既有约定，同收藏星标）；
+                   **选中态也常显** —— 点卡片会选中并预览，那正是用户在决定"要不要这张"
+                   的时刻，不该让按钮还藏着。
+                   已下载时这个槽位让给左上角的「已下载」徽标，两者互斥不重叠。 -->
+              <button
+                v-if="item.kind === 'bing' && !store.isBingDownloaded(item)"
+                class="bing-dl absolute right-1.5 top-1.5 z-[6] flex cursor-pointer items-center gap-1 rounded-md border border-white/10 bg-black/45 px-1.5 py-[2px] opacity-0 backdrop-blur-[2px] transition-opacity duration-200 group-hover:opacity-100 hover:border-white/25 hover:bg-black/65"
+                :style="isBingDownloading(item) || isSelected(item) ? { opacity: 1 } : undefined"
+                :disabled="!!store.bingDownloadingDate"
+                :title="'下载到本地壁纸目录（不会改变桌面）'"
+                @click.stop="onDownloadBing(item)"
+              >
+                <NIcon
+                  :component="Download"
+                  :size="10"
+                  :class="isBingDownloading(item) ? 'text-accent' : 'text-white/75'"
+                />
+                <span class="text-[9.5px] leading-none text-white/85">
+                  {{ isBingDownloading(item) ? "下载中" : "下载" }}
+                </span>
+              </button>
             </div>
             <!-- 收藏星标：已收藏常显琥珀色，未收藏 hover 浮现；点击切换收藏
                 （必应在线壁纸为远程 URL，不参与收藏夹书签体系，不显示星标） -->
@@ -571,8 +631,10 @@ function onThumbLoad(e: Event) {
               />
             </button>
             <div class="meta flex min-w-0 items-center gap-1.5 px-2 py-1.5">
-              <span class="name truncate text-[11.5px] text-dim">
-                {{ item.title || baseName(item.path || "") || "壁纸" }}
+              <!-- 卡片宽度自适应，标题长了会截断 —— 挂原生 title，鼠标悬停看全名。
+                   可见文字与 title 同源（itemLabel），不会出现"看到的和提示的不一样" -->
+              <span class="name truncate text-[11.5px] text-dim" :title="itemLabel(item)">
+                {{ itemLabel(item) }}
               </span>
               <!-- 状态点：绿=当前壁纸(已设置到桌面/正在播放)，蓝=正在预览(选中) -->
               <span

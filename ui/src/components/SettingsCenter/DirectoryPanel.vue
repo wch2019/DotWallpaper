@@ -1,21 +1,16 @@
 <script setup lang="ts">
 // 壁纸目录设置 — 当前目录显示 / 选择目录 / 恢复默认
-import { ref, onMounted } from "vue";
+// 必应下载目录为**派生只读**：恒等于 `<壁纸目录>\BingWallpaper`，不提供选择器
+import { ref, onMounted, watch } from "vue";
 import { NButton, NIcon, useMessage } from "naive-ui";
-import { FolderOpen, FolderSync, Trash2, Image as ImageIcon, DownloadCloud } from "lucide-vue-next";
-import { useWallpaperStore, DIR_STORAGE_KEY, BING_DIR_KEY } from "@/stores/wallpaper";
+import { FolderOpen, FolderSync, Trash2, Image as ImageIcon, DownloadCloud, AlertTriangle } from "lucide-vue-next";
+import { useWallpaperStore, DIR_STORAGE_KEY } from "@/stores/wallpaper";
 import { toast } from "@/lib/naive-host";
 import { invoke } from "@tauri-apps/api/core";
 
 const store = useWallpaperStore();
 const message = useMessage();
 const loading = ref(false);
-
-function resolveDirArg(): string | null {
-  return store.currentDir && store.currentDir.trim()
-    ? store.currentDir.trim()
-    : null;
-}
 
 function displayDir() {
   if (store.currentDir && store.currentDir.trim()) return store.currentDir.trim();
@@ -51,46 +46,27 @@ async function onRestoreDefault() {
   }
 }
 
-// 必应壁纸目录
-const bingLoading = ref(false);
-const bingDir = ref("");
+// ---- 必应下载目录（只读派生） ----
+// 路径不在前端拼：`<壁纸目录>\BingWallpaper` 这条规则只在 Rust 侧存在一份，
+// 这里只负责展示后端给的最终路径。遗留目录（老版本可单独配置）只提示不搬移。
+const openingLegacy = ref(false);
 
-// 从 localStorage 读取当前必应下载目录（与本地壁纸目录保持一致的前端持久化方式）
-function loadBingDir() {
+async function onOpenLegacyDir() {
+  const dir = store.bingDirInfo?.legacy_dir;
+  if (!dir) return;
+  openingLegacy.value = true;
   try {
-    bingDir.value = localStorage.getItem(BING_DIR_KEY) || "";
-  } catch {
-    bingDir.value = "";
-  }
-}
-
-async function onPickBingDirectory() {
-  bingLoading.value = true;
-  try {
-    const picked = (await invoke("pick_bing_wallpaper_directory")) as string | null;
-    if (picked) {
-      bingDir.value = picked;
-      try {
-        localStorage.setItem(BING_DIR_KEY, picked);
-      } catch { /* ignore */ }
-      toast("已选择必应壁纸目录：" + picked, "success");
-    }
+    await invoke("reveal_in_explorer", { path: dir });
   } catch (err: unknown) {
     message.error(String(err));
   } finally {
-    bingLoading.value = false;
+    openingLegacy.value = false;
   }
 }
 
-async function onRestoreDefaultBing() {
-  bingDir.value = "";
-  try {
-    localStorage.removeItem(BING_DIR_KEY);
-  } catch { /* ignore */ }
-  toast("已恢复必应壁纸默认目录（图片目录\\BingWallpaper）", "success");
-}
-
-onMounted(() => { loadBingDir(); });
+onMounted(() => { void store.refreshBingDirInfo(); });
+// 壁纸目录一变，派生出的下载目录跟着变；面板常驻，靠 watch 补刷新
+watch(() => store.currentDir, () => { void store.refreshBingDirInfo(); });
 </script>
 
 <template>
@@ -143,7 +119,7 @@ onMounted(() => { loadBingDir(); });
 
     <div class="divider" />
 
-    <!-- 必应壁纸目录 -->
+    <!-- 必应壁纸目录（只读派生：<壁纸目录>\BingWallpaper） -->
     <div class="panel-header pt-5">
       <NIcon :component="DownloadCloud" :size="18" class="panel-icon text-accent" />
       <div class="panel-title">必应壁纸目录</div>
@@ -154,40 +130,34 @@ onMounted(() => { loadBingDir(); });
       <div class="dir-label">下载目录</div>
       <div class="dir-value">
         <NIcon :component="ImageIcon" :size="16" class="dir-icon" />
-        <span class="dir-path">
-          {{ bingDir ? bingDir : "默认（图片目录\\BingWallpaper）" }}
-        </span>
+        <span class="dir-path">{{ store.bingDirInfo?.dir || "读取中…" }}</span>
       </div>
+      <div class="dir-hint">固定为「壁纸目录」下的 BingWallpaper 子目录，随上方目录自动跟随</div>
     </div>
 
-    <div class="dir-actions">
-      <NButton
-        type="primary"
-        size="small"
-        @click="onPickBingDirectory"
-        :disabled="bingLoading"
-      >
+    <!-- 老版本遗留目录：只提示不搬移。用户在旧版本里单独指定过下载目录时，
+         那些文件落在壁纸目录之外，「本地」选项卡扫不到 —— 给数量 + 打开入口。 -->
+    <div v-if="store.bingDirInfo?.legacy_dir && store.bingDirInfo.legacy_count > 0" class="legacy-card">
+      <div class="legacy-head">
+        <NIcon :component="AlertTriangle" :size="14" class="legacy-icon" />
+        <span class="legacy-title">发现旧版本的下载目录</span>
+      </div>
+      <div class="legacy-path">{{ store.bingDirInfo.legacy_dir }}</div>
+      <div class="legacy-text">
+        该目录里还有 {{ store.bingDirInfo.legacy_count }} 张必应壁纸，它们不在当前壁纸目录内，
+        因此不会出现在「本地」选项卡中。手动移到上方目录后即可正常管理。
+      </div>
+      <NButton size="tiny" secondary :disabled="openingLegacy" @click="onOpenLegacyDir">
         <template #icon>
-          <NIcon :component="FolderOpen" />
+          <NIcon :component="FolderOpen" :size="13" />
         </template>
-        {{ bingLoading ? "正在选择..." : "选择目录" }}
-      </NButton>
-
-      <NButton
-        size="small"
-        secondary
-        @click="onRestoreDefaultBing"
-      >
-        <template #icon>
-          <NIcon :component="Trash2" :size="15" />
-        </template>
-        恢复默认目录
+        打开该目录
       </NButton>
     </div>
 
     <div class="dir-note">
       <NIcon :component="DownloadCloud" :size="13" class="note-icon" />
-      <span>点击"设为壁纸"时，必应原图将下载到此目录，文件名为 BingWallpaper_YYYYMMDD.jpg</span>
+      <span>点击"设为壁纸"或卡片上的「下载」时，必应原图将下载到此目录，文件名为 BingWallpaper_日期.jpg</span>
     </div>
   </div>
 </template>
@@ -278,5 +248,43 @@ onMounted(() => { loadBingDir(); });
 .dir-note span {
   font-size: 11.5px;
   color: var(--color-dim);
+}
+
+/* ========== 旧版本遗留目录提示 ========== */
+.legacy-card {
+  margin-top: 0.9rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 10px;
+  background: rgba(255, 184, 92, 0.07);
+  border: 1px solid rgba(255, 184, 92, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  align-items: flex-start;
+}
+.legacy-head {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.legacy-icon {
+  color: #ffb85c;
+  flex-shrink: 0;
+}
+.legacy-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffd39a;
+}
+.legacy-path {
+  font-size: 11.5px;
+  color: var(--color-tx);
+  word-break: break-all;
+  line-height: 1.4;
+}
+.legacy-text {
+  font-size: 11px;
+  color: var(--color-dim);
+  line-height: 1.5;
 }
 </style>

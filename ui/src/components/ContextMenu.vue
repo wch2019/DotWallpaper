@@ -1,10 +1,17 @@
 <script setup lang="ts">
 // ContextMenu - 全局右键菜单（壁纸项）
 import { NIcon } from "naive-ui";
-import { CheckCircle2, FolderSearch, MonitorDown, Star, Trash2, X } from "lucide-vue-next";
+import { CheckCircle2, Download, FolderSearch, MonitorDown, Star, Trash2, X } from "lucide-vue-next";
+import { computed } from "vue";
 import { useWallpaperStore } from "../stores/wallpaper";
 
 const store = useWallpaperStore();
+
+// 必应在线壁纸且尚未下载时，才提供"只下载、不改桌面"这一项
+// （已下载的再点只是白跑一趟；要操作就去「本地」选项卡）
+const canDownloadBing = computed(
+  () => store.ctxItem?.kind === "bing" && !store.isBingDownloaded(store.ctxItem)
+);
 
 function onAction(action: string) {
   store.handleContextAction(action, store.ctxItem);
@@ -31,6 +38,17 @@ function onAction(action: string) {
         >
           <NIcon :component="MonitorDown" :size="14" class="text-dim" />
           设为桌面壁纸
+        </button>
+
+        <!-- 必应在线壁纸：只下载到本地壁纸目录，不改桌面。
+             放在"设为桌面壁纸"正下方 —— 这两个是该来源下的两条并列路径。 -->
+        <button
+          v-if="canDownloadBing"
+          class="cm-item flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px] text-tx transition-colors hover:bg-white/10"
+          @click="onAction('download-bing')"
+        >
+          <NIcon :component="Download" :size="14" class="text-dim" />
+          下载到本地
         </button>
 
         <!-- 收藏 / 取消收藏：书签标记，不删文件（本地/系统壁纸通用）；必应在线壁纸为远程 URL，收藏夹书签体系不适用，不显示该入口 -->

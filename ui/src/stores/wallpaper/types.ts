@@ -84,7 +84,15 @@ export interface ThumbnailUpdatedPayload {
 
 // ---------- 常量 ----------
 export const DIR_STORAGE_KEY = "dot-wallpaper-dir"; // localStorage 持久化键
-export const BING_DIR_KEY = "dot-wallpaper-bing-dir"; // localStorage 必应壁纸目录键
+/// 【遗留键，只读不写】旧版"必应壁纸下载目录"的 localStorage 键。
+///
+/// 下载目录现在是**派生**的（`<壁纸目录>\BingWallpaper`，见 `bing::download_dir`），
+/// 不再提供独立配置。这个键只剩一个用途：设置页检测到旧值、且那个目录里确实还有
+/// 必应壁纸时，提示一次"旧目录里的文件不会自动搬移"，并给出打开目录的入口。
+///
+/// **刻意不删除它**：用户把文件搬走之前，这条提示应该一直在（删了就再也没人提醒
+/// 那批文件在哪）。前端全程只读。
+export const BING_DIR_KEY = "dot-wallpaper-bing-dir";
 export const FAVORITES_KEY = "dot-wallpaper-favorites"; // localStorage 收藏书签集合键
 export const EFFECT_STORAGE_KEY = "dot-wallpaper-effect"; // localStorage 壁纸效果键
 export const CLOSE_BEHAVIOR_KEY = "dot-wallpaper-close-behavior"; // localStorage 关闭窗口行为键
@@ -144,6 +152,31 @@ export interface BingWallpaperData {
   thumb: string; // 远程缩略图 URL（全尺寸 URL 追加 &w=... 参数）
   title: string; // 壁纸标题
   date: string; // 日期（YYYYMMDD），作为下载缓存文件名与卡片对应键
+}
+
+/// 本地已下载的必应壁纸条目（对应后端 `list_downloaded_bing_wallpapers`）。
+///
+/// 后端扫的是**本地壁纸目录**（递归找 `BingWallpaper_*`），
+/// 因此这份结果与「本地」选项卡"能否看到该文件"是同一个事实来源：
+/// 它亮徽标 ⇒ 跳到本地选项卡一定定位得到。
+export interface DownloadedBingData {
+  date: string; // 日期（YYYYMMDD），与在线条目同格式，作为徽标判定键
+  path: string; // 本地绝对路径
+}
+
+/// 必应下载目录信息（对应后端 `get_bing_download_dir_info`，设置页只读展示用）。
+///
+/// 下载目录是**派生**的（`<壁纸目录>\BingWallpaper`），前端不自己拼路径 ——
+/// 派生规则只在 Rust 侧存在一份。
+///
+/// ⚠️ 字段名保持 **snake_case**：本项目 serde 结构体一律没有 `rename_all`，
+/// 线上格式就是 Rust 字段名（`position_hint` / `scale_factor` 同理）。
+/// 改成 camelCase 不会报任何错，只会让 `legacy_dir` 静默变成 undefined、
+/// 遗留目录提示永远不出现。
+export interface BingDownloadDirInfo {
+  dir: string; // 当前生效的下载目录（已格式化为反斜杠，可直接展示）
+  legacy_dir: string | null; // 老版本遗留的独立下载目录，未设置则 null
+  legacy_count: number; // 遗留目录里还剩多少张必应壁纸（0 = 不提示）
 }
 
 /// 壁纸模糊遮罩效果参数（与后端 wallpaper::WallpaperEffect 对齐）

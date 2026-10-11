@@ -192,7 +192,7 @@ function errText(e: unknown): string {
             </div>
             <div class="upd-head-text">
               <div class="upd-title">{{ headTitle }}</div>
-              <div class="upd-desc" v-if="headDesc">{{ headDesc }}</div>
+              <div class="upd-desc" v-if="headDesc" :title="headDesc">{{ headDesc }}</div>
             </div>
             <button
               class="upd-close"

@@ -3,7 +3,7 @@
 // - 扫描本地壁纸目录（Windows 自带壁纸目录 + 用户图片文件夹）
 
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{LPARAM, WPARAM, WIN32_ERROR};
 use windows::Win32::System::Registry::{
@@ -238,9 +238,13 @@ fn is_under_windows_dir(path: &std::path::Path) -> bool {
 }
 
 /// 递归遍历目录，收集全部支持的壁纸文件（图片 + 动态壁纸视频）
-fn walk_dir(dir: &PathBuf) -> std::io::Result<Vec<String>> {
+/// 递归遍历目录（含子目录），返回受支持的壁纸文件路径（原生分隔符未规范化）。
+///
+/// `pub(crate)`：必应那边要在**本地壁纸目录**里找已下载的壁纸
+/// （见 `bing::scan_downloaded`），复用同一个遍历实现而不是各写一份。
+pub(crate) fn walk_dir(dir: &Path) -> std::io::Result<Vec<String>> {
     let mut found: Vec<String> = Vec::new();
-    let mut stack = vec![dir.clone()];
+    let mut stack = vec![dir.to_path_buf()];
 
     while let Some(current) = stack.pop() {
         let entries = match std::fs::read_dir(&current) {

@@ -48,7 +48,11 @@ function setColor(v: string) {
           </span>
           <div class="min-w-0">
             <div class="text-[12.5px] font-medium text-tx">启用效果</div>
-            <div class="mt-0.5 truncate text-[11px] text-faint">
+            <!-- 说明文案在窄面板里会截断 → 悬停看全文 -->
+            <div
+              class="mt-0.5 truncate text-[11px] text-faint"
+              title="开启后右栏预览实时模拟，设为壁纸时对原图合成模糊与遮罩"
+            >
               开启后右栏预览实时模拟，设为壁纸时对原图合成模糊与遮罩
             </div>
           </div>

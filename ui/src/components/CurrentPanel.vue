@@ -540,7 +540,8 @@ const monitorOptions = computed(() =>
 function renderMonitorOption(option: { label: string; value: number }) {
   const m = store.availableMonitors.find((x) => x.index === option.value);
   return h("div", { class: "flex w-full items-center gap-3" }, [
-    h("span", { class: "min-w-0 flex-1 truncate" }, option.label),
+    // 通俗名可能很长（"DELL U2720Q · 主屏"），窄下拉里会截断 → 悬停看全名
+    h("span", { class: "min-w-0 flex-1 truncate", title: option.label }, option.label),
     h(
       "span",
       { class: "shrink-0 font-mono text-[10.5px] opacity-60" },
@@ -1232,7 +1233,8 @@ onUnmounted(() => {
         </button>
         <!-- 底部信息条 -->
         <div class="zoom-info absolute bottom-6 left-1/2 z-10 flex max-w-[80%] -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-full border border-white/10 bg-black/55 px-4 py-1.5 text-[12px] text-white/90 backdrop-blur">
-          <span class="truncate">{{ previewName || "—" }}</span>
+          <!-- 名称过长时截断 → 悬停看全名（信息条宽度上限 80%，长标题必截） -->
+          <span class="truncate" :title="previewName || '—'">{{ previewName || "—" }}</span>
           <span class="h-3 w-px shrink-0 bg-white/15"></span>
           <!-- 视频不适用填充样式（按填充铺满），故此处标类型而非样式 -->
           <span class="flex shrink-0 items-center gap-1 text-accent">

@@ -149,7 +149,8 @@ function onDragPointerUp() {
                 默认
               </span>
             </div>
-            <div class="mt-0.5 truncate text-[11px] text-faint">{{ rowByKey[key].desc }}</div>
+            <!-- 来源说明在窄面板里会截断 → 悬停看全文 -->
+            <div class="mt-0.5 truncate text-[11px] text-faint" :title="rowByKey[key].desc">{{ rowByKey[key].desc }}</div>
           </div>
         </div>
         <div class="flex shrink-0 items-center gap-1">

@@ -254,54 +254,122 @@ async fn list_bing_wallpapers() -> Result<Vec<bing::BingWallpaper>, String> {
         .map_err(|e| e.to_string())?
 }
 
-/// 下载必应壁纸原图到本地缓存目录，返回本地绝对路径
+/// 拉取某个**年月**的必应壁纸历史（社区归档源，按月分片，约 30 条）。
 ///
-/// 下载目录由前端传入（前端 localStorage 持久化，键 `dot-wallpaper-bing-dir`），
-/// 未传或为空时退回默认 `图片目录\\BingWallpaper`。同名文件已存在时直接复用。
+/// 官方 `HPImageArchive` 只能回溯 16 天（`n` 被钳制在 8、`idx>8` 返回同一批），
+/// 滚动看更早的必须走这里。`year`/`month` 由前端按"上一批最旧那条"往前推。
+///
+/// **返回空数组 = 该月没有归档**（超出仓库覆盖范围、早期缺月），前端据此停止加载 ——
+/// 这不是错误；只有所有 CDN 镜像都不可用才返回 Err。
+#[tauri::command]
+async fn list_bing_archive_month(
+    year: u32,
+    month: u32,
+) -> Result<Vec<bing::BingWallpaper>, String> {
+    tauri::async_runtime::spawn_blocking(move || bing::fetch_archive_month(year, month))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 下载必应壁纸原图到本地，返回本地绝对路径
+///
+/// **下载目录不可单独配置**：固定为 `<本地壁纸目录>\BingWallpaper`，由 `directory`
+/// （前端的当前壁纸目录，空 = 默认图片目录）派生。这样"下载下来的壁纸一定在本地
+/// 壁纸目录里"是结构性成立的 —— 用户改壁纸目录时下载目录自动跟随，不会出现
+/// "下载完两个选项卡都看不到"。同名文件已存在时直接复用（同一天重复点不重复走网络）。
+///
+/// 落盘文件名固定为 `BingWallpaper_<YYYYMMDD>.jpg`（**不带接口标题**）。
 #[tauri::command]
 async fn download_bing_wallpaper(
     url: String,
     date: String,
-    dir: Option<String>,
+    directory: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
-    let dir = dir
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| bing::default_bing_dir().ok())
-        .ok_or_else(|| "无法确定必应壁纸下载目录".to_string())?;
-    let dir_path = PathBuf::from(dir);
+    let dir_path = bing::download_dir(directory);
     ensure_asset_scope(&app, &dir_path);
     tauri::async_runtime::spawn_blocking(move || bing::download_wallpaper(&url, &date, &dir_path))
         .await
         .map_err(|e| e.to_string())?
 }
 
-/// 弹出文件对话框选择必应壁纸下载目录，仅返回所选路径（持久化由前端 localStorage 负责）
+/// 本地已下载的必应壁纸条目（对应前端 `DownloadedBingData`）
+#[derive(serde::Serialize)]
+struct DownloadedBingItem {
+    /// 日期 YYYYMMDD，与在线条目的 date 同格式，作为徽标判定键
+    date: String,
+    /// 本地绝对路径（点徽标跳到「本地」选项卡后据此定位）
+    path: String,
+}
+
+/// 列出**本地壁纸目录**里已下载的必应壁纸（递归找 `BingWallpaper_<YYYYMMDD>.jpg`）。
 ///
-/// 返回 `Ok(None)` 表示用户取消。注意：必须保持为同步命令 —— blocking_pick_folder
-/// 会阻塞当前线程等待主线程事件循环返回对话框结果，放在 async 命令里会阻塞异步运行时。
+/// 结果同时服务两件事：必应卡片上的"已下载"徽标，以及点徽标后跳到「本地」选项卡
+/// 的定位。**扫的是本地壁纸目录而不是下载目录** —— 只有让判据与"本地选项卡能否
+/// 看到"共用同一个事实来源，两者才不会互相矛盾（扫下载目录会在用户改过壁纸目录
+/// 之后说谎：文件在下载目录里，却不在本地列表里）。
+///
+/// 只做目录遍历 + 文件名匹配：**不 stat、不生成缩略图**（徽标用不上图），
+/// 因此既不需要 asset scope，也不必进缩略图那套 blocking 管线。
 #[tauri::command]
-fn pick_bing_wallpaper_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
+async fn list_downloaded_bing_wallpapers(
+    directory: Option<String>,
+) -> Result<Vec<DownloadedBingItem>, String> {
+    // 与 list_local_wallpapers 同一套目录解析口径：空 = 默认图片目录
+    let dir = resolve_save_dir(directory);
+    tauri::async_runtime::spawn_blocking(move || -> Vec<DownloadedBingItem> {
+        bing::scan_downloaded(&dir)
+            .into_iter()
+            .map(|(date, path)| DownloadedBingItem { date, path })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
 
-    // 拿不到已配置目录时退回默认目录；默认目录不存在则先建出来，
-    // 否则对话框的初始定位会失效
-    let default_dir = bing::default_bing_dir()
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_default();
-    if !default_dir.is_empty() {
-        let _ = std::fs::create_dir_all(&default_dir);
-    }
+/// 必应下载目录信息（设置页只读展示用）
+#[derive(Serialize)]
+struct BingDownloadDirInfo {
+    /// 当前生效的下载目录：`<壁纸目录>\BingWallpaper`（反斜杠形式，可直接展示）
+    dir: String,
+    /// 老版本遗留的独立下载目录（前端 `dot-wallpaper-bing-dir`），未设置则为 null
+    legacy_dir: Option<String>,
+    /// 遗留目录里还剩多少张必应壁纸（0 = 不必提示）
+    legacy_count: usize,
+}
 
-    let mut builder = app.dialog().file().set_title("选择必应壁纸下载目录");
-    if !default_dir.is_empty() {
-        builder = builder.set_directory(&PathBuf::from(&default_dir));
-    }
-    let res = builder.blocking_pick_folder();
-
-    // FilePath → 字符串：Windows 下统一为反斜杠（不转义，避免出现 "\\\\"）
-    Ok(res.map(|path| path.to_string().replace('/', "\\")))
+/// 返回必应下载目录信息：当前生效目录 + 老版本遗留目录（含剩余数量）。
+///
+/// **路径派生只在 Rust 侧做一次**，设置页只负责展示 —— 前端自己拼
+/// `<目录>\BingWallpaper` 会让"下载到底落在哪"出现第二个事实来源，改派生规则时
+/// 必然漏改一处。同理，默认目录在 Rust 侧能拿到真实的 `USERPROFILE`，
+/// 前端只能写 `C:\Users\<用户名>\Pictures` 这种占位文本。
+///
+/// 遗留目录是只读提示（2026-10-10 拍板：老文件**不搬移**）：用户一旦在旧版本
+/// 里单独指定过必应下载目录，那些文件就落在壁纸目录之外，「本地」选项卡看不到。
+/// 这里只报数量让用户知情，并给一个"打开该目录"的入口，绝不擅自移动用户文件。
+#[tauri::command]
+async fn get_bing_download_dir_info(
+    directory: Option<String>,
+    legacy_dir: Option<String>,
+) -> Result<BingDownloadDirInfo, String> {
+    let dir = bing::download_dir(directory);
+    let legacy = legacy_dir
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    tauri::async_runtime::spawn_blocking(move || {
+        let legacy_count = legacy
+            .as_deref()
+            .map(|d| bing::scan_downloaded(std::path::Path::new(d)).len())
+            .unwrap_or(0);
+        BingDownloadDirInfo {
+            dir: dir.to_string_lossy().replace('/', "\\"),
+            legacy_dir: legacy,
+            legacy_count,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// 在系统资源管理器中定位文件/目录（右键"跳转到当前文件目录"）
@@ -641,8 +709,10 @@ fn main() {
             list_local_wallpapers,
             list_system_wallpapers,
             list_bing_wallpapers,
+            list_bing_archive_month,
+            list_downloaded_bing_wallpapers,
+            get_bing_download_dir_info,
             download_bing_wallpaper,
-            pick_bing_wallpaper_directory,
             list_wallpapers_by_paths,
             pick_wallpaper_directory,
             reveal_in_explorer,
