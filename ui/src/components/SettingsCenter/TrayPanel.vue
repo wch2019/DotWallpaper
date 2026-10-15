@@ -4,13 +4,39 @@ import { ref, onMounted } from "vue";
 import { NIcon, NRadio, NRadioGroup, NSwitch } from "naive-ui";
 import { Power, LogOut } from "lucide-vue-next";
 import { isEnabled, enable, disable } from "@tauri-apps/plugin-autostart";
-import { CLOSE_BEHAVIOR_KEY } from "@/stores/wallpaper";
+import { CLOSE_BEHAVIOR_KEY, AUTOSTART_SHOW_KEY, type AutostartWindowMode } from "@/stores/wallpaper";
 import { toast } from "@/lib/naive-host";
 import { invoke } from "@tauri-apps/api/core";
 
 const behavior = ref<"exit" | "tray">("tray");
 const autoStart = ref(false);
 const autoStartBusy = ref(false);
+// 开机启动后的行为：静默后台（默认）还是打开主界面。仅在自启动开启时有意义。
+const startMode = ref<AutostartWindowMode>("silent");
+
+// 从 localStorage 读取"开机后是否打开主界面"（未配置时默认静默后台运行）
+function loadStartMode() {
+  try {
+    startMode.value = localStorage.getItem(AUTOSTART_SHOW_KEY) === "window" ? "window" : "silent";
+  } catch {
+    startMode.value = "silent";
+  }
+}
+
+function onStartModeChange(value: AutostartWindowMode) {
+  startMode.value = value;
+  try {
+    localStorage.setItem(AUTOSTART_SHOW_KEY, value);
+  } catch {
+    /* ignore */
+  }
+  toast(
+    value === "window"
+      ? "开机后将自动打开主界面"
+      : "开机后将静默驻留托盘，不打开主窗口",
+    "success"
+  );
+}
 
 // 从 localStorage 读取关闭行为（未配置时默认最小化到托盘，贴合后台运行诉求）
 function loadBehavior() {
@@ -59,7 +85,7 @@ async function onAutoStartChange(value: boolean) {
       await disable();
     }
     autoStart.value = value;
-    toast(value ? "已开启开机自启动" : "已关闭开机自启动", "success");
+    toast(value ? "已开启开机自启动：开机后静默后台运行" : "已关闭开机自启动", "success");
   } catch {
     autoStart.value = !value;
     toast("切换开机自启动失败，请稍后重试", "error");
@@ -70,6 +96,7 @@ async function onAutoStartChange(value: boolean) {
 
 onMounted(() => {
   loadBehavior();
+  loadStartMode();
   loadAutoStart();
 });
 </script>
@@ -89,9 +116,30 @@ onMounted(() => {
             <NIcon :component="Power" :size="13" class="note-icon" />
             <span>开机自启动</span>
           </div>
-          <div class="option-hint">登录 Windows 后自动在后台运行（写入系统启动项）</div>
+          <div class="option-hint">登录 Windows 后自动启动（写入系统启动项）</div>
         </div>
         <NSwitch :value="autoStart" :loading="autoStartBusy" @update:value="onAutoStartChange" />
+      </div>
+
+      <!-- 开机后行为：只在开启自启动时有意义，未开启时置灰不可选 -->
+      <div class="autostart-when">
+        <div class="tray-label">开机后</div>
+        <NRadioGroup
+          v-model:value="startMode"
+          :disabled="!autoStart"
+          @update:value="onStartModeChange"
+        >
+          <div class="tray-options">
+            <div class="tray-option">
+              <NRadio value="silent">静默后台运行</NRadio>
+              <div class="option-hint">只在系统托盘显示图标，不打开主窗口</div>
+            </div>
+            <div class="tray-option">
+              <NRadio value="window">打开主界面</NRadio>
+              <div class="option-hint">启动后自动弹出主窗口，和手动双击图标一样</div>
+            </div>
+          </div>
+        </NRadioGroup>
       </div>
     </div>
 
@@ -189,6 +237,13 @@ onMounted(() => {
   font-size: 13px;
   font-weight: 600;
   color: var(--color-tx);
+}
+
+/* ========== 开机后行为 ========== */
+.autostart-when {
+  margin-top: 0.9rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--color-line);
 }
 
 /* ========== 底部提示 ========== */

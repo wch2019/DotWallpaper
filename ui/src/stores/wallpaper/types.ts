@@ -98,6 +98,14 @@ export const EFFECT_STORAGE_KEY = "dot-wallpaper-effect"; // localStorage 壁纸
 export const CLOSE_BEHAVIOR_KEY = "dot-wallpaper-close-behavior"; // localStorage 关闭窗口行为键
 export type CloseBehavior = "exit" | "tray"; // 关闭窗口：exit=直接退出，tray=最小化到托盘（后台运行）
 
+/// 开机自启动时"要不要打开主界面"的 localStorage 键（值 "window" = 打开；缺失/其它 = 静默）。
+///
+/// 默认静默 —— 这是"开机常驻后台"的默认预期，也让老用户升级后行为保持不变。
+/// 后端在 `--autostart` 下**一律不显示窗口**（避免开机瞬间闪一下），由前端挂载后
+/// 按本偏好决定要不要补一次 `apply_autostart_window_pref`。
+export const AUTOSTART_SHOW_KEY = "dot-wallpaper-autostart-show-window";
+export type AutostartWindowMode = "silent" | "window"; // 开机启动后：silent=只留托盘，window=打开主界面
+
 /// 动态壁纸静音偏好的 localStorage 键（值 "1" = 静音）。
 ///
 /// 持久化的是**偏好**而非运行时状态：暂停不持久化（重启后本就没有动态壁纸，

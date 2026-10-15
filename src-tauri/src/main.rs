@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 /// 关闭主窗口时是否隐藏到托盘（true）还是直接退出（false）。
 /// 由前端在读取 localStorage 后通过 `set_close_behavior` 同步过来。
@@ -29,6 +29,44 @@ static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
 #[tauri::command]
 fn set_close_behavior(hide_to_tray: bool) {
     CLOSE_TO_TRAY.store(hide_to_tray, Ordering::Relaxed);
+}
+
+/// 开机自启动标记参数：带此参数启动 = 静默后台运行，**不显示主窗口**。
+///
+/// 由 `tauri_plugin_autostart::init` 原样写进系统启动项，启动时在本进程内自行解析。
+/// 两个地方必须用同一个字面量 —— 改这里就够了（init 那边引用本常量）。
+const AUTOSTART_FLAG: &str = "--autostart";
+
+/// 本次进程是否由"开机自启动"拉起（启动项带了 `--autostart`）。
+///
+/// 用 `std::env::args()` 而非 Tauri 的 CLI 插件：这个参数是我们自己塞进启动项的，
+/// 不需要也不该暴露成用户可见的命令行选项。
+fn launched_by_autostart() -> bool {
+    std::env::args().any(|a| a == AUTOSTART_FLAG)
+}
+
+/// 开机自启动启动时，按用户偏好决定要不要把主窗口显示出来。
+///
+/// 后端在 `--autostart` 下**一律不显示窗口**（配置里 `visible:false` + `setup` 不调
+/// `show()`），避免开机瞬间闪一下；用户若选了"开机后打开主界面"，由前端在挂载后调用
+/// 本命令补上这一次 `show()`。
+///
+/// **偏好由前端传入**，后端不持有第二个存储 —— 前端偏好统一存 localStorage，与
+/// "关闭窗口行为"（`set_close_behavior`）是同一套模式。后端只做执行者。
+///
+/// 返回是否真的显示了：非开机自启动启动、或偏好为静默时返回 `false`。
+/// 幂等，前端可以放心无条件调用。
+#[tauri::command]
+fn apply_autostart_window_pref(show_window: bool, app: tauri::AppHandle) -> bool {
+    if !show_window || !launched_by_autostart() {
+        return false;
+    }
+    let Some(win) = app.get_webview_window("main") else {
+        return false;
+    };
+    let _ = win.show();
+    let _ = win.set_focus();
+    true
 }
 
 /// 设置壁纸命令的统一返回：设置成功后返回实际使用的本地路径
@@ -668,7 +706,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
-            Some(vec![]),
+            Some(vec![AUTOSTART_FLAG]),
         ))
         .setup(|app| {
             // 启动时即把缩略图缓存目录加入 asset protocol scope，
@@ -682,6 +720,30 @@ fn main() {
             // 系统托盘：左键单击恢复主窗口，右键菜单提供"显示主界面 / 退出"。
             // 关闭窗口行为（直接退出 / 隐藏到托盘）由前端按 localStorage 配置决定。
             setup_tray(app.handle())?;
+
+            // 主窗口在 tauri.conf.json 里是 visible:false —— 先建好再决定要不要显示，
+            // 这样开机自启动时不会先闪一下窗口再隐藏。显示决策只看启动来源：
+            //   带 --autostart（开机拉起）→ 保持隐藏，只留托盘图标，静默后台运行；
+            //   手动双击图标          → 显示并聚焦，和以往行为一致。
+            // 注意：隐藏的是**主窗口**，动态壁纸是后端另建的置底窗口，不受影响 ——
+            // 开机后动态壁纸照常恢复（前端在隐藏窗口里也会跑完挂载流程）。
+            let by_autostart = launched_by_autostart();
+            if let Some(win) = app.get_webview_window("main") {
+                if !by_autostart {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
+
+            // 老版本升级兼容：旧版写入的启动项**不带** `--autostart`，照它启动仍会弹窗。
+            // 借用户手动启动这一次把启动项重写一遍（插件按 init 时配置的 args 重建），
+            // 下次开机就是静默的。只在手动启动时做，避免每次开机都去写注册表。
+            if !by_autostart {
+                let mgr = app.autolaunch();
+                if mgr.is_enabled().unwrap_or(false) {
+                    let _ = mgr.enable();
+                }
+            }
             Ok(())
         })
         // 关闭主窗口的兜底处理：按偏好隐藏到托盘，避免前端监听丢失时静默退出。
@@ -722,6 +784,7 @@ fn main() {
             set_desktop_style,
             get_desktop_screen,
             set_close_behavior,
+            apply_autostart_window_pref,
             video_wallpaper::set_video_wallpaper,
             video_wallpaper::set_video_wallpaper_muted,
             video_wallpaper::set_video_wallpaper_paused,

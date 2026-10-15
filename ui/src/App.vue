@@ -18,7 +18,7 @@ import ContextMenu from "./components/ContextMenu.vue";
 import DropZone from "./components/DropZone.vue";
 import NaiveBridge from "./components/NaiveBridge.vue";
 import UpdateDialog from "./components/UpdateDialog.vue";
-import { useWallpaperStore, CLOSE_BEHAVIOR_KEY } from "./stores/wallpaper";
+import { useWallpaperStore, CLOSE_BEHAVIOR_KEY, AUTOSTART_SHOW_KEY } from "./stores/wallpaper";
 import { toast } from "./lib/naive-host";
 import { useUpdaterStore } from '@/stores/updater'
 import { isStoreBuild } from '@/utils/updater'
@@ -156,12 +156,35 @@ async function syncCloseBehavior() {
   }
 }
 
+// 开机自启动 + 用户选择"打开主界面" → 补一次显示主窗口。
+//
+// 后端在 `--autostart` 下一律不显示窗口（避免开机瞬间闪一下），这里按 localStorage
+// 里的偏好决定要不要补上。偏好为默认的"静默"时**连 IPC 都不发**；非开机启动时
+// 后端也会直接返回 false，所以无条件调用是安全的。
+async function applyAutostartWindowPref() {
+  let mode = "silent";
+  try {
+    mode = localStorage.getItem(AUTOSTART_SHOW_KEY) || "silent";
+  } catch {
+    /* ignore */
+  }
+  if (mode !== "window") return;
+  try {
+    await invoke("apply_autostart_window_pref", { showWindow: true });
+  } catch {
+    /* 兜底：显示失败也不影响主流程，用户仍可从托盘打开 */
+  }
+}
+
 onMounted(() => {
   // 关闭窗口行为：按设置决定直接退出或隐藏到系统托盘（后台运行）。
   // 托盘图标由后端常驻，左键单击恢复窗口，右键菜单"退出"彻底结束进程。
   // 先把偏好同步给后端做兜底：前端监听在页面重载时可能丢失，
   // 后端持有该开关可保证"关闭窗口"始终按用户设置执行。
   void syncCloseBehavior();
+
+  // 开机自启动时后端不显示窗口，这里按用户偏好决定要不要补上（默认静默）。
+  void applyAutostartWindowPref();
 
   void appWindow.onCloseRequested(async (event) => {
     let behavior = "exit";
