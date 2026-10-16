@@ -45,6 +45,27 @@ fn launched_by_autostart() -> bool {
     std::env::args().any(|a| a == AUTOSTART_FLAG)
 }
 
+/// 把主窗口从**任何**状态恢复出来并置前：最小化 → 还原，隐藏 → 显示，然后聚焦。
+///
+/// **`unminimize()` 必须最先调，顺序不能省**：tao 的 `set_focus()` 在窗口最小化时
+/// 整个函数空转 —— `tao-0.35.3/src/platform_impl/windows/window.rs:183` 是
+/// `if is_visible && !is_minimized && !is_foreground { force_window_active(..) }`，
+/// 而 `show()` 只等价于 `ShowWindow(SW_SHOW)`，**不还原最小化窗口**。
+/// 所以"只调 show + set_focus"对最小化窗口等于什么都没做 —— 这正是
+/// "最小化后点托盘图标没反应"的根因（曾同时存在于托盘左键与托盘菜单两处）。
+///
+/// 托盘左键、托盘菜单、单实例回调三处共用，别再各写一遍。
+/// 返回是否找到了主窗口。
+fn restore_main_window(app: &tauri::AppHandle) -> bool {
+    let Some(win) = app.get_webview_window("main") else {
+        return false;
+    };
+    let _ = win.unminimize();
+    let _ = win.show();
+    let _ = win.set_focus();
+    true
+}
+
 /// 开机自启动启动时，按用户偏好决定要不要把主窗口显示出来。
 ///
 /// 后端在 `--autostart` 下**一律不显示窗口**（配置里 `visible:false` + `setup` 不调
@@ -61,12 +82,7 @@ fn apply_autostart_window_pref(show_window: bool, app: tauri::AppHandle) -> bool
     if !show_window || !launched_by_autostart() {
         return false;
     }
-    let Some(win) = app.get_webview_window("main") else {
-        return false;
-    };
-    let _ = win.show();
-    let _ = win.set_focus();
-    true
+    restore_main_window(&app)
 }
 
 /// 设置壁纸命令的统一返回：设置成功后返回实际使用的本地路径
@@ -673,10 +689,7 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                restore_main_window(app);
             }
             "quit" => app.exit(0),
             _ => {}
@@ -688,11 +701,7 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 ..
             } = event
             {
-                let app = tray.app_handle();
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                restore_main_window(tray.app_handle());
             }
         })
         .build(app)?;
@@ -701,6 +710,20 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
 fn main() {
     tauri::Builder::default()
+        // 单实例必须**第一个**注册：它在插件 setup 阶段就抢占实例锁，注册晚了的话
+        // 前面的插件/窗口已经产生副作用 —— 用户会看到第二个托盘图标、第二套动态壁纸
+        // 置底窗口（label 是进程内唯一的，两套窗口挂在同一个 WorkerW 下互相覆盖），
+        // 以及两套 4s 显示器巡检并行抢着管理同一批窗口。
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // 走到这里 = 已有实例在跑，本次是"第二次启动"。
+            // 恢复已有窗口是用户双击图标时的预期；最小化/隐藏状态都能拉出来。
+            // 例外：第二实例由开机自启动拉起（正常开机时不会有实例在跑，属罕见路径），
+            // 保持静默、不弹窗，与"开机静默后台运行"的默认预期一致。
+            if args.iter().any(|a| a == AUTOSTART_FLAG) {
+                return;
+            }
+            restore_main_window(app);
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -728,11 +751,8 @@ fn main() {
             // 注意：隐藏的是**主窗口**，动态壁纸是后端另建的置底窗口，不受影响 ——
             // 开机后动态壁纸照常恢复（前端在隐藏窗口里也会跑完挂载流程）。
             let by_autostart = launched_by_autostart();
-            if let Some(win) = app.get_webview_window("main") {
-                if !by_autostart {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+            if !by_autostart {
+                restore_main_window(app.handle());
             }
 
             // 老版本升级兼容：旧版写入的启动项**不带** `--autostart`，照它启动仍会弹窗。

@@ -23,6 +23,9 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp"] }
 tauri-plugin-autostart = "2"
 
+# 单实例：第二次启动不再开新进程，改为把已有窗口拉出来（必须最先注册的插件）
+tauri-plugin-single-instance = "2"
+
 # Windows Win32 API（设置桌面壁纸使用 SystemParametersInfoW）
 # + Media Foundation（后端提取视频首帧生成缩略图）
 [target.'cfg(windows)'.dependencies]
