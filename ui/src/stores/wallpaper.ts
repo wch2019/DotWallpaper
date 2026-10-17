@@ -1618,6 +1618,13 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     isBingDownloaded,
     videoWallpaper,
     videoMuted,
+    // 播放参数四个 ref **必须导出**：面板要读它们做高亮、摘要与片段输入框回填。
+    // 漏导出的表现极具迷惑性 —— action 仍然可用（invoke 照发、后端照改），
+    // 但界面读到的全是 undefined，于是"点了没反应"，看起来像整块功能都失效。
+    videoSpeed,
+    videoLoop,
+    videoClipStart,
+    videoClipEnd,
     autoPauseHistory,
     availableMonitors,
     selectedMonitors,

@@ -345,7 +345,6 @@ const effectMaskStyle = computed(() => {
 // 但参数在效果关闭时毫无意义，故：打开开关 → 自动展开一次（刚开启多半要调）；
 // 关闭开关 → 自动收起。用户手动收起后不会被再次强行展开。
 const fxExpanded = ref(false);
-const scopeExpanded = ref(false);
 
 function onToggleEffect(v: boolean) {
   store.setEffect({ enabled: v });
@@ -606,20 +605,6 @@ const clipActive = computed(
 // 用户不展开也知道现在是什么状态。
 const settingsExpanded = ref(false);
 
-/// 摘要条文案。**必须反映真实生效的值**，否则用户会以为设置没生效。
-const settingsSummary = computed(() => {
-  const parts: string[] = [`${store.videoSpeed}×`];
-  parts.push(store.videoLoop === "once" ? "单次" : "循环");
-  if (clipActive.value) {
-    const s = store.videoClipStart;
-    const e = store.videoClipEnd;
-    parts.push(e > 0 ? `片段 ${s}–${e}s` : `片段 ${s}s 起`);
-  } else {
-    parts.push("整段");
-  }
-  return parts.join(" · ");
-});
-
 /// 提交片段区间。空 / 非数字 / 0 一律当作"不设限"（开始=0，结束=到结尾）。
 async function commitClip() {
   if (clipInvalid.value) return;
@@ -651,6 +636,29 @@ const monitorList = computed<MonitorItem[]>(() => store.availableMonitors);
 const allMonitors = computed(() => store.selectedMonitors.length === 0);
 // 单台显示器时无需展示选择区（没得选）
 const showMonitorPicker = computed(() => monitorList.value.length > 1);
+
+/// 摘要条文案。**必须反映真实生效的值**，否则用户会以为设置没生效。
+///
+/// 放在显示器相关声明**之后**：它要读 `showMonitorPicker` / `allMonitors`，
+/// 写在前面虽然靠 computed 的惰性求值也能跑，但读代码的人得来回翻。
+const settingsSummary = computed(() => {
+  const parts: string[] = [`${store.videoSpeed}×`];
+  parts.push(store.videoLoop === "once" ? "单次" : "循环");
+  if (clipActive.value) {
+    const s = store.videoClipStart;
+    const e = store.videoClipEnd;
+    parts.push(e > 0 ? `片段 ${s}–${e}s` : `片段 ${s}s 起`);
+  } else {
+    parts.push("整段");
+  }
+  // 播放范围并入设置区之后，**必须也进摘要** —— 否则收起状态下
+  // 用户完全看不出这张壁纸铺在哪几台屏上，而那是这里影响面最大的一项。
+  // 单屏时不显示：只有一台屏，说"全部屏"是废话。
+  if (showMonitorPicker.value) {
+    parts.push(allMonitors.value ? "全部屏" : `${store.selectedMonitors.length} 台屏`);
+  }
+  return parts.join(" · ");
+});
 
 // 某台显示器当前是否生效
 function monitorSelected(index: number): boolean {
@@ -1212,20 +1220,6 @@ onUnmounted(() => {
           >
             {{ baseName(store.videoWallpaper.path) }}
           </span>
-          <!-- 展开播放范围（仅多显示器时有内容，单屏时隐藏箭头） -->
-          <button
-            v-if="showMonitorPicker"
-            class="acc-chevron flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded text-dim transition-colors hover:bg-white/10 hover:text-tx"
-            :title="scopeExpanded ? '收起播放范围' : '展开播放范围'"
-            @click="scopeExpanded = !scopeExpanded"
-          >
-            <NIcon
-              :component="ChevronDown"
-              :size="13"
-              :class="scopeExpanded ? 'rotate-180' : ''"
-              style="transition: transform 0.18s ease"
-            />
-          </button>
         </div>
 
         <!-- 播放控制：停止 / 暂停 / 静音 **同占一行**（常驻，不折叠）。
@@ -1422,6 +1416,58 @@ onUnmounted(() => {
               全部
             </button>
           </div>
+
+          <!-- 播放范围：多显示器时才有意义，单屏时整块不渲染。
+               **注意与顶部那条区分**：顶部下拉只切预览效果，这里才是真正
+               决定"播到哪几台"的地方。
+
+               放在设置区**最后**（紧凑参数之后）：它是一列竖排的屏，比上面
+               三行高得多；若排在最前，多屏用户一展开就得先滚过它才能看到
+               速度/循环。放最后则"常用参数先出现、长列表后出现"。
+
+               语义上它也确实属于"这张壁纸的参数"，和速度/循环/片段同级 ——
+               原来它挂在状态行右侧的箭头上，与下一行"播放设置"的箭头一上一下
+               紧挨着，看起来像同一组控件，这才是那块区域显乱的原因。 -->
+          <div v-if="showMonitorPicker" class="border-t border-line/60 pt-1.5">
+            <div class="mb-1.5 flex items-center justify-between">
+              <span class="text-[10px] text-faint">播放范围</span>
+              <button
+                class="cursor-pointer rounded px-1.5 py-0.5 text-[10px] transition-colors"
+                :class="allMonitors ? 'text-faint' : 'text-accent hover:bg-accent/10'"
+                :disabled="allMonitors"
+                @click="onSelectAllMonitors"
+              >
+                全部显示器
+              </button>
+            </div>
+            <div class="flex flex-col gap-1">
+              <button
+                v-for="m in monitorList"
+                :key="m.index"
+                class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-left transition-colors"
+                :class="
+                  monitorSelected(m.index)
+                    ? 'bg-accent/12 text-tx'
+                    : 'text-dim hover:bg-white/5'
+                "
+                @click="onToggleMonitor(m.index)"
+              >
+                <span
+                  class="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] border transition-colors"
+                  :class="
+                    monitorSelected(m.index)
+                      ? 'border-accent bg-accent text-white'
+                      : 'border-line'
+                  "
+                >
+                  <NIcon v-if="monitorSelected(m.index)" :component="Check" :size="10" />
+                </span>
+                <span class="min-w-0 flex-1 truncate text-[10.5px]" :title="monitorTitle(m)">
+                  {{ monitorLabel(m) }}
+                </span>
+              </button>
+            </div>
+          </div>
         </div>
 
         <!-- 自动暂停说明：暂停按钮此时是禁用态，光靠 title 提示不够 ——
@@ -1481,49 +1527,6 @@ onUnmounted(() => {
                 {{ formatHistoryDuration(r.duration_ms) }}
               </span>
             </div>
-          </div>
-        </div>
-
-        <!-- 动态壁纸播放范围：多显示器时才有意义。
-             注意与顶部那条区分：顶部只切预览效果，这里才是真正决定"播到哪几台"。 -->
-        <div v-if="showMonitorPicker && scopeExpanded" class="mt-2.5">
-          <div class="mb-1.5 flex items-center justify-between">
-            <span class="text-[10.5px] text-faint">播放范围</span>
-            <button
-              class="cursor-pointer rounded px-1.5 py-0.5 text-[10.5px] transition-colors"
-              :class="allMonitors ? 'text-faint' : 'text-accent hover:bg-accent/10'"
-              :disabled="allMonitors"
-              @click="onSelectAllMonitors"
-            >
-              全部显示器
-            </button>
-          </div>
-          <div class="flex flex-col gap-1">
-            <button
-              v-for="m in monitorList"
-              :key="m.index"
-              class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-left transition-colors"
-              :class="
-                monitorSelected(m.index)
-                  ? 'bg-accent/12 text-tx'
-                  : 'text-dim hover:bg-white/5'
-              "
-              @click="onToggleMonitor(m.index)"
-            >
-              <span
-                class="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] border transition-colors"
-                :class="
-                  monitorSelected(m.index)
-                    ? 'border-accent bg-accent text-white'
-                    : 'border-line'
-                "
-              >
-                <NIcon v-if="monitorSelected(m.index)" :component="Check" :size="10" />
-              </span>
-              <span class="min-w-0 flex-1 truncate text-[10.5px]" :title="monitorTitle(m)">
-                {{ monitorLabel(m) }}
-              </span>
-            </button>
           </div>
         </div>
       </div>
