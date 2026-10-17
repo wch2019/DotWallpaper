@@ -407,7 +407,10 @@ interface VideoState {
   path: string;
   monitors: number[];
   muted: boolean;
+  /** 用户手动暂停（播放页不直接用它，仅保留字段含义） */
   paused: boolean;
+  /** 有效暂停 = 手动 || 环境自动暂停（全屏 / 电池 / 锁屏）。**播放页只认这一位** */
+  effective_paused: boolean;
 }
 
 /// 把静音 / 暂停应用到两个视频元素。
@@ -432,7 +435,10 @@ function applyPlayback() {
 /// 必须配的判据。
 function applyState(st: VideoState) {
   muted.value = !!st.muted;
-  paused.value = !!st.paused;
+  // **用 effective_paused 而不是 paused**：后者只表示用户手动暂停，
+  // 环境自动暂停（全屏游戏 / 电池 / 锁屏）必须同样冻结画面。
+  // 播放页因此不需要知道暂停是谁触发的 —— 后端已经合成好这一位。
+  paused.value = !!st.effective_paused;
   // 已停止：`stop_video_wallpaper` 是直接关窗、不发事件，所以正常收不到这一支；
   // 但万一"停止"与"建窗"并发、窗口活了下来，冻结画面总好过继续播一个
   // 已经被取消的壁纸。

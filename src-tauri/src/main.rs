@@ -810,6 +810,7 @@ fn main() {
             video_wallpaper::set_video_wallpaper_paused,
             video_wallpaper::stop_video_wallpaper,
             video_wallpaper::get_video_wallpaper_state,
+            video_wallpaper::get_auto_pause_history,
             video_wallpaper::list_monitors
         ])
         .run(tauri::generate_context!())

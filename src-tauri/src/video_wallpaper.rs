@@ -33,12 +33,12 @@
 //   用指纹把"需要校正"限定在真正的配置变化时刻，稳定态才是绝对的零写操作。
 //   机制细节见 `memory/video-wallpaper.md`。
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use windows::core::PCWSTR;
@@ -83,6 +83,216 @@ const MONITORS_CHANGED_EVENT: &str = "monitors-changed";
 
 // ---------- 全局状态 ----------
 
+// ============================================================================
+// 自动暂停（智能暂停）：全屏应用 / 电池供电 / 会话锁定
+// ============================================================================
+//
+// 与用户手动暂停（`VideoWallpaperState::paused`）**刻意分开存**：
+// - 手动暂停是用户意图，由 `set_video_wallpaper_paused` 写入，一直保持；
+// - 自动暂停是环境信号，每轮巡检重算，条件消失就自动恢复。
+// 混进同一个 bool 就分不清"当前暂停是用户按的还是环境给的"，
+// "退出全屏后自动恢复"也就无从判断。
+//
+// 下发给播放页的是**有效暂停**（`effective_paused` = 手动 || 自动），
+// 播放页因此完全不必改判据；主界面另取 `auto_pause` 解释原因。
+
+/// 自动暂停原因。`None` 表示环境正常、不介入。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AutoPause {
+    None,
+    /// 前台有全屏应用（游戏 / 全屏视频 / 演示模式）
+    Fullscreen,
+    /// 笔记本处于电池供电
+    Battery,
+    /// 会话已锁定（Win+L 或息屏锁屏）
+    Locked,
+}
+
+impl AutoPause {
+    /// 下发给前端的稳定标识（前端据此显示中文原因，不要下发中文）
+    fn as_code(self) -> Option<&'static str> {
+        match self {
+            AutoPause::None => None,
+            AutoPause::Fullscreen => Some("fullscreen"),
+            AutoPause::Battery => Some("battery"),
+            AutoPause::Locked => Some("locked"),
+        }
+    }
+}
+
+// ---------- 自动暂停历史 ----------
+//
+// 为什么需要这份记录：锁屏 / 电池这两类信号发生时用户看不见桌面，
+// 画面"暂停过"与"一直在播"在视觉上完全一样；release 版又没有控制台，
+// `eprintln!` 无处可看。用户报"锁屏回来视频不对"时，
+// 这份进程内记录是唯一能回答"状态机到底有没有走过一轮"的东西。
+//
+// **只记事件、不记轮询**：进入暂停时开一条，退出时补时长。
+// 因此列表长度反映真实发生过的次数，不会随 4s 巡检无限膨胀。
+
+/// 历史容量。20 条足够覆盖"一天里遇到几次全屏/锁屏"，
+/// 又不至于让设置页变成一本流水账。
+const AUTO_PAUSE_LOG_CAP: usize = 20;
+
+/// 一条自动暂停记录（**一次事件**，不是一次轮询）。
+#[derive(Clone, serde::Serialize)]
+pub struct AutoPauseRecord {
+    /// 触发原因标识：`"fullscreen"` / `"battery"` / `"locked"`
+    pub reason: String,
+    /// 开始时刻（Unix 毫秒）。下发时间戳而非格式化字符串：
+    /// 时区与格式归前端，后端掺和本地化只会在换语言/换时区时出错。
+    pub started_at: i64,
+    /// 持续时长（毫秒）。`None` = 仍在暂停中（正处在全屏里，或还没解锁）。
+    pub duration_ms: Option<i64>,
+}
+
+static AUTO_PAUSE_LOG: OnceLock<Mutex<VecDeque<AutoPauseRecord>>> = OnceLock::new();
+fn auto_pause_log() -> &'static Mutex<VecDeque<AutoPauseRecord>> {
+    AUTO_PAUSE_LOG.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 给末尾那条"未结束"的记录补上时长。
+///
+/// 判据是**记录自身**的 `duration_ms` 为空，而不是调用方传来的 `prev != None`：
+/// 状态可能被 `stop_video_wallpaper` 直接重置成 `None` 而不经过
+/// `record_auto_pause`，那种情况下列表末尾仍挂着一条未结束记录，
+/// 必须由下一次收尾动作兜住。
+fn settle_last_auto_pause(log: &mut VecDeque<AutoPauseRecord>, now: i64) {
+    if let Some(last) = log.back_mut() {
+        if last.duration_ms.is_none() {
+            last.duration_ms = Some(now.saturating_sub(last.started_at));
+        }
+    }
+}
+
+/// 自动暂停原因变化时落一条记录。
+///
+/// 时长精度受巡检间隔限制（±4s）：解锁瞬间到下一轮巡检之间视频仍在播，
+/// 那段时间会被算进暂停时长。展示按"秒"取整即可，不必伪装成精确值。
+fn record_auto_pause(prev: AutoPause, next: AutoPause) {
+    if prev == next {
+        return;
+    }
+    let now = now_millis();
+    let mut log = auto_pause_log().lock().unwrap();
+    settle_last_auto_pause(&mut log, now);
+    let Some(code) = next.as_code() else {
+        return;
+    };
+    if log.len() >= AUTO_PAUSE_LOG_CAP {
+        log.pop_front();
+    }
+    log.push_back(AutoPauseRecord {
+        reason: code.to_string(),
+        started_at: now,
+        duration_ms: None,
+    });
+}
+
+/// 收尾当前未结束的记录（停止动态壁纸时调用）。
+///
+/// 停止后巡检在 `hwnds.is_empty()` 处短路，再也不会调用 `record_auto_pause`；
+/// 不主动收尾的话那条记录会永远显示"进行中"。
+fn close_auto_pause_record() {
+    let now = now_millis();
+    settle_last_auto_pause(&mut auto_pause_log().lock().unwrap(), now);
+}
+
+/// 查询当前是否应自动暂停。
+///
+/// 优先级：锁屏 > 全屏 > 电池。锁屏时全屏查询本身也可能给出异常值，
+/// 先判锁屏才能报出更准确的原因。
+///
+/// **所有查询失败一律按"不暂停"处理** —— 与巡检里"拿不到显示器信息就不动"
+/// 是同一条原则：信息缺失时，最糟的选择是自作主张改变用户看到的东西。
+#[cfg(windows)]
+fn detect_auto_pause() -> AutoPause {
+    if session_locked() {
+        return AutoPause::Locked;
+    }
+    if fullscreen_app_running() {
+        return AutoPause::Fullscreen;
+    }
+    if on_battery() {
+        return AutoPause::Battery;
+    }
+    AutoPause::None
+}
+
+#[cfg(not(windows))]
+fn detect_auto_pause() -> AutoPause {
+    AutoPause::None
+}
+
+/// 会话是否已锁定。
+///
+/// 锁屏后输入桌面切到 Winlogon，`OpenInputDesktop` 因此失败（通常是拒绝访问）。
+/// 这比注册 `WTSRegisterSessionNotification` 再维护一个消息循环省事得多，
+/// 而且**可轮询** —— 与本模块的巡检模型一致，不必引入消息窗口。
+#[cfg(windows)]
+fn session_locked() -> bool {
+    use windows::Win32::System::StationsAndDesktops::{
+        CloseDesktop, OpenInputDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS,
+    };
+    // 权限只要够打开即可，不需要真的去读或切换桌面。
+    // 只请求 DESKTOP_READOBJECTS 一项：这两个标志位类型在 windows-rs 里
+    // 没有实现 `BitOr`，拼合反而要手动构造，用单一权限更省事也够用。
+    match unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) } {
+        Ok(h) => {
+            // 打开成功必须关掉，否则每 4s 泄漏一个桌面句柄
+            let _ = unsafe { CloseDesktop(h) };
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+/// 前台是否被全屏应用占满。
+///
+/// 用 `SHQueryUserNotificationState` 而不是自己比较前台窗口矩形：
+/// 多屏、无边框全屏、混合 DPI、任务栏自动隐藏这些情况下矩形判断都会翻车，
+/// 而这个 API 直接回答"系统当前是否认为有东西全屏占着"。
+#[cfg(windows)]
+fn fullscreen_app_running() -> bool {
+    use windows::Win32::UI::Shell::{
+        SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE,
+        QUNS_RUNNING_D3D_FULL_SCREEN,
+    };
+    // windows-rs 把这个函数包装成直接返回状态（无出参），查询失败返回 Err
+    let Ok(state) = (unsafe { SHQueryUserNotificationState() }) else {
+        return false;
+    };
+    // 只认"真的被全屏占满"的三种。
+    // **刻意不含 QUNS_APP**：它表示"前台是 UWP 应用"，计算器、设置页都会命中，
+    // 加进去会让动态壁纸在正常用电脑时被反复误暂停。
+    state == QUNS_BUSY
+        || state == QUNS_RUNNING_D3D_FULL_SCREEN
+        || state == QUNS_PRESENTATION_MODE
+}
+
+/// 是否处于电池供电。
+///
+/// 台式机恒为"交流电"，因此这条对台式机不产生任何影响；
+/// 只有拔掉电源的笔记本会命中。
+#[cfg(windows)]
+fn on_battery() -> bool {
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    let mut st = SYSTEM_POWER_STATUS::default();
+    // 返回 Result<()>：查询失败按"不暂停"处理
+    if unsafe { GetSystemPowerStatus(&mut st) }.is_err() {
+        return false;
+    }
+    // ACLineStatus: 0=电池, 1=交流电, 255=未知。未知时不动。
+    st.ACLineStatus == 0
+}
+
 #[derive(Clone)]
 struct VideoWallpaperState {
     enabled: bool,
@@ -98,7 +308,13 @@ struct VideoWallpaperState {
     /// 是否暂停（冻结在当前帧，恢复时从原处继续）。
     /// **不持久化**：重启后本就没有动态壁纸，存它没有意义。
     /// 切换视频会复位为 false（换了片子就该开始播），只改播放范围则保持。
+    ///
+    /// 注意这是**用户手动暂停**。环境触发的暂停在 `auto_pause` 里，
+    /// 两者分开存才能实现"退出全屏后自动恢复"。见上方 `AutoPause`。
     paused: bool,
+    /// 自动暂停原因（全屏应用 / 电池供电 / 会话锁定）。
+    /// **不持久化**，由巡检每轮重算；`None` = 环境正常。
+    auto_pause: AutoPause,
 }
 
 fn state() -> &'static Mutex<VideoWallpaperState> {
@@ -110,6 +326,7 @@ fn state() -> &'static Mutex<VideoWallpaperState> {
             monitors: Vec::new(),
             muted: false,
             paused: false,
+            auto_pause: AutoPause::None,
         })
     })
 }
@@ -226,8 +443,15 @@ pub struct VideoWallpaperStateOut {
     pub monitors: Vec<usize>,
     /// 静音播放
     pub muted: bool,
-    /// 是否暂停
+    /// 是否暂停（**仅表示用户手动暂停**，不含环境自动暂停）
     pub paused: bool,
+    /// 有效暂停 = 手动 || 自动。**播放页只认这一位** ——
+    /// 这样"环境自动暂停"对播放页完全透明，它不必知道暂停是谁触发的。
+    pub effective_paused: bool,
+    /// 自动暂停原因标识：`"fullscreen"` / `"battery"` / `"locked"`，
+    /// `None` 表示未自动暂停。供主界面解释状态（播放页不需要）。
+    /// 下发**标识**而非中文：文案归属前端，后端不掺和本地化。
+    pub auto_pause: Option<&'static str>,
 }
 
 /// 显示器描述（供前端渲染选择列表）
@@ -681,6 +905,12 @@ fn spawn_relink_watcher(app: tauri::AppHandle) {
         if hwnds.is_empty() {
             continue;
         }
+
+        // ---- 智能暂停：全屏应用 / 电池供电 / 会话锁定 ----
+        // 放在"有窗口"之后：没有动态壁纸在播时，这三项查询毫无意义。
+        // 只改状态并广播，**绝不碰窗口** —— 本模块的第一原则仍是"就位后一次都不碰"。
+        refresh_auto_pause(&app);
+
         let monitors = app.available_monitors().unwrap_or_default();
         // 拿不到显示器列表 → **整轮跳过**，一个窗口都别碰。
         //
@@ -949,7 +1179,37 @@ fn state_out(s: &VideoWallpaperState) -> VideoWallpaperStateOut {
         monitors: s.monitors.clone(),
         muted: s.muted,
         paused: s.paused,
+        effective_paused: s.paused || s.auto_pause != AutoPause::None,
+        auto_pause: s.auto_pause.as_code(),
     }
+}
+
+/// 重算自动暂停原因，**仅在原因变化时**广播状态。
+///
+/// 每轮巡检都会调用，但只在真正变化时才 emit —— 否则每 4s 一次无谓的全窗口
+/// 广播，播放页会反复走 `applyState`。"没事就别喊"是本模块一贯的取舍。
+fn refresh_auto_pause(app: &tauri::AppHandle) {
+    let reason = detect_auto_pause();
+    let prev = {
+        let mut s = state().lock().unwrap();
+        if s.auto_pause == reason {
+            return;
+        }
+        let prev = s.auto_pause;
+        s.auto_pause = reason;
+        prev
+    };
+    // 先落历史再广播：前端收到事件后会立刻回拉历史，
+    // 顺序反了就会拿到一条尚未写入的列表（表现为"刚锁屏解锁，记录里什么都没有"）。
+    record_auto_pause(prev, reason);
+    // 打一条日志再广播。**这条日志是锁屏/电池这两类信号的唯一验证手段**：
+    // 它们发生时用户看不到桌面，画面"暂停过"与"一直在播"在视觉上完全一样，
+    // 只能靠 `tauri dev` 的控制台确认状态机真的走过一轮。
+    // 只在**变化时**打印，稳定态下一行都不会有，不会刷屏。
+    // release 版没有控制台，那种场景改用 `get_auto_pause_history` 查询。
+    eprintln!("[动态壁纸] 自动暂停 -> {reason:?}");
+    // 锁必须在广播前释放：`emit_state_to_windows` 内部自己会再取一次
+    emit_state_to_windows(app);
 }
 
 /// 把当前状态广播给**所有已存在**的动态壁纸窗口。
@@ -974,6 +1234,12 @@ fn emit_state_to_windows(app: &tauri::AppHandle) {
         if let Some(win) = app.get_webview_window(&window_label_for(i)) {
             let _ = win.emit(VIDEO_STATE_EVENT, out.clone());
         }
+    }
+    // 主界面也要收：自动暂停由**巡检线程**触发，主窗口不在事件链上就永远显示
+    // "播放中"，与用户实际看到的静止画面矛盾。
+    // 主窗口只取 `auto_pause` / `effective_paused`；静音的事实来源仍是前端 localStorage。
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.emit(VIDEO_STATE_EVENT, out);
     }
 }
 
@@ -1021,6 +1287,9 @@ pub async fn set_video_wallpaper(
     // 先取旧状态：muted / paused 的取舍取决于"这次是不是换了片子"。
     let prev = state().lock().unwrap().clone();
     let path_changed = prev.path != path;
+    // 立即评估一次环境信号。否则新设的壁纸会先播满一个巡检周期（4s）才被暂停，
+    // 用户看到的是"刚设好就卡住"，而原因（全屏/电池）要等下一轮才知道。
+    let auto_pause = detect_auto_pause();
     *state().lock().unwrap() = VideoWallpaperState {
         enabled: true,
         path: path.clone(),
@@ -1029,7 +1298,12 @@ pub async fn set_video_wallpaper(
         // 换视频 → 复位暂停：换了片子就该开始播，否则用户会以为新视频也坏了；
         // 只改播放范围 → 保持暂停（用户是暂停着在调整范围，不该被偷偷恢复）。
         paused: if path_changed { false } else { prev.paused },
+        auto_pause,
     };
+
+    // 与巡检走同一条记录路径：设壁纸时就已处在全屏/电池里，
+    // 也应当出现在历史中（否则"刚设上就是静止的"会没有任何解释）。
+    record_auto_pause(prev.auto_pause, auto_pause);
 
     let monitor_count = app.available_monitors().map(|m| m.len()).unwrap_or(0).max(1);
     // 按"窗口 label 序号 == 显示器下标"约定，算出应存在的窗口集合
@@ -1343,8 +1617,13 @@ pub async fn stop_video_wallpaper(app: tauri::AppHandle) -> Result<(), String> {
             monitors: Vec::new(),
             muted,
             paused: false,
+            // 停止即清空自动暂停：下次启用时会重新评估，留着旧值会让新壁纸一上来就静止
+            auto_pause: AutoPause::None,
         };
     }
+    // 巡检此后会在 `hwnds.is_empty()` 处短路、不再写历史，
+    // 这里主动收尾，避免最后一条记录永远停在"进行中"。
+    close_auto_pause_record();
     close_all_video_windows(&app);
     Ok(())
 }
@@ -1353,4 +1632,16 @@ pub async fn stop_video_wallpaper(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn get_video_wallpaper_state() -> Result<VideoWallpaperStateOut, String> {
     Ok(state_out(&state().lock().unwrap().clone()))
+}
+
+/// 查询最近的自动暂停历史（**最新在前**）。
+///
+/// 供主界面展示"锁屏/全屏/电池期间确实暂停过"。这是 release 版
+/// 唯一可查的证据来源 —— 那些场景用户看不见桌面，也没有控制台可看。
+///
+/// 顺序在这里就反好：用户关心的是刚刚那次，而不是二十次以前。
+#[tauri::command]
+pub async fn get_auto_pause_history() -> Result<Vec<AutoPauseRecord>, String> {
+    let log = auto_pause_log().lock().unwrap();
+    Ok(log.iter().rev().cloned().collect())
 }

@@ -217,6 +217,12 @@ onMounted(() => {
   void listen("monitors-changed", () => {
     void store.loadMonitors();
   });
+  // 动态壁纸状态事件：自动暂停（全屏应用 / 电池供电 / 锁屏）由后端巡检单方面发起，
+  // 主界面不跟着更新的话，面板会一直显示"播放中"，与用户看到的静止画面矛盾。
+  // 只同步 autoPause，其余字段各有自己的事实来源（见 store 里 syncVideoAutoPause 的注释）。
+  void listen<{ auto_pause?: string | null }>("video-wallpaper-state", (e) => {
+    store.syncVideoAutoPause(e.payload);
+  });
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("mousedown", onGlobalMouseDown);
   window.addEventListener("blur", store.closeContextMenu);

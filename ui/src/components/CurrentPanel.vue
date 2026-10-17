@@ -7,7 +7,7 @@
 //   - 预览样式下拉可即时预览；设为壁纸时若与系统样式不同会同步写注册表
 import { computed, h, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { NButton, NColorPicker, NIcon, NSelect, NSlider, NSwitch } from "naive-ui";
-import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, LayoutGrid, Maximize, Monitor, Pause, Play, Sparkles, Square, Star, Volume2, VolumeX, X } from "lucide-vue-next";
+import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, History, LayoutGrid, Maximize, Monitor, Pause, Play, Sparkles, Square, Star, Volume2, VolumeX, X } from "lucide-vue-next";
 import {
   baseName,
   displaySrc,
@@ -471,7 +471,72 @@ async function onStopVideoWallpaper() {
 // 暂停 / 恢复。与"停止"是两回事：暂停只冻结当前帧（画面留在最后一帧），
 // 恢复从暂停处继续；停止会销毁置底窗口、桌面退回静态壁纸。
 async function onToggleVideoPause() {
+  // 自动暂停期间不允许手动"继续"：后端下一轮巡检会立刻重新暂停，
+  // 用户点了等于没反应。按钮此时也是禁用态，这里只是兜底。
+  if (store.videoWallpaper.autoPause) return;
   await store.setVideoPaused(!store.videoWallpaper.paused);
+}
+
+// ---------- 环境自动暂停（全屏应用 / 电池供电 / 锁屏） ----------
+//
+// 后端巡检每 4s 判定一次，条件出现就暂停、消失就自动恢复。前端只负责解释状态。
+// 文案归前端：后端下发的是稳定标识（fullscreen / battery / locked），不掺和本地化。
+const AUTO_PAUSE_TEXT: Record<string, string> = {
+  fullscreen: "全屏应用运行中",
+  battery: "电池供电中",
+  locked: "已锁屏",
+};
+
+/// 自动暂停原因的中文说明（空串 = 未自动暂停）
+const autoPauseText = computed(() => {
+  const code = store.videoWallpaper.autoPause;
+  return code ? AUTO_PAUSE_TEXT[code] ?? "环境限制" : "";
+});
+
+/// 面板展示用的"是否暂停"：手动暂停与环境自动暂停都算，
+/// 保证状态点、按钮配色与实际画面三者一致。
+const videoPaused = computed(
+  () => store.videoWallpaper.paused || !!store.videoWallpaper.autoPause
+);
+
+// ---------- 自动暂停记录 ----------
+//
+// 锁屏 / 电池这两类暂停发生时用户看不见桌面，画面"暂停过"与"一直在播"
+// 完全一样；release 版又没有控制台。这份列表是**唯一能自查的证据**：
+// 解锁回来打开面板，就能看到"14:32:07 已锁屏 · 37 秒"。
+//
+// 默认收起：它是事后追溯用的，不该在常驻区抢占播放控制的位置。
+const historyExpanded = ref(false);
+const autoPauseHistory = computed(() => store.autoPauseHistory);
+
+/// 记录里的时刻：当天只显示时分秒，跨天补上月-日。
+/// 不显示年份 —— 20 条记录不可能跨越一年，多两字符只会挤掉原因文字。
+function formatHistoryTime(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (sameDay) return `${hh}:${mm}:${ss}`;
+  const M = String(d.getMonth() + 1).padStart(2, "0");
+  const D = String(d.getDate()).padStart(2, "0");
+  return `${M}-${D} ${hh}:${mm}`;
+}
+
+/// 持续时长：`null` = 仍在暂停中。
+/// 精度受后端 4s 巡检限制，故只到"秒"、不显示毫秒。
+function formatHistoryDuration(ms: number | null): string {
+  if (ms === null) return "进行中";
+  const s = Math.round(ms / 1000);
+  if (s < 1) return "<1 秒";
+  if (s < 60) return `${s} 秒`;
+  const m = Math.floor(s / 60);
+  const rest = s % 60;
+  return rest ? `${m} 分 ${rest} 秒` : `${m} 分`;
 }
 
 // 静音开关：只影响桌面动态壁纸的音频（应用内的小预览与放大浮层**一律静音**，
@@ -1033,14 +1098,16 @@ onUnmounted(() => {
           <span
             class="flex shrink-0 items-center gap-1.5 text-[10.5px] text-faint"
             :title="
-              store.videoWallpaper.paused
-                ? '动态壁纸已暂停（画面冻结在当前帧）'
-                : '动态壁纸播放中'
+              store.videoWallpaper.autoPause
+                ? `动态壁纸已自动暂停（${autoPauseText}），条件解除后自动恢复`
+                : store.videoWallpaper.paused
+                  ? '动态壁纸已暂停（画面冻结在当前帧）'
+                  : '动态壁纸播放中'
             "
           >
             <span
               class="h-1.5 w-1.5 shrink-0 rounded-full"
-              :class="store.videoWallpaper.paused ? 'bg-amber-400/90' : 'bg-ok/90'"
+              :class="videoPaused ? 'bg-amber-400/90' : 'bg-ok/90'"
             ></span>
             动态壁纸
           </span>
@@ -1092,25 +1159,31 @@ onUnmounted(() => {
           </button>
           <!-- 暂停 / 恢复 -->
           <button
-            class="flex flex-1 cursor-pointer items-center justify-center gap-1 rounded border px-1.5 py-1 text-[10.5px] transition-colors"
-            :class="
-              store.videoWallpaper.paused
-                ? 'border-amber-400/50 bg-amber-400/10 text-amber-300 hover:border-amber-400/80'
-                : 'border-line-2 text-dim hover:border-white/25 hover:bg-white/10 hover:text-tx'
-            "
+            class="flex flex-1 items-center justify-center gap-1 rounded border px-1.5 py-1 text-[10.5px] transition-colors"
+            :class="[
+              videoPaused
+                ? 'border-amber-400/50 bg-amber-400/10 text-amber-300'
+                : 'border-line-2 text-dim hover:border-white/25 hover:bg-white/10 hover:text-tx',
+              store.videoWallpaper.autoPause
+                ? 'cursor-not-allowed opacity-60'
+                : 'cursor-pointer',
+            ]"
             :title="
-              store.videoWallpaper.paused
-                ? '从暂停处继续播放'
-                : '暂停（冻结当前画面，不关闭动态壁纸）'
+              store.videoWallpaper.autoPause
+                ? `已自动暂停（${autoPauseText}），条件解除后自动恢复`
+                : store.videoWallpaper.paused
+                  ? '从暂停处继续播放'
+                  : '暂停（冻结当前画面，不关闭动态壁纸）'
             "
+            :disabled="!!store.videoWallpaper.autoPause"
             @click="onToggleVideoPause"
           >
             <NIcon
-              :component="store.videoWallpaper.paused ? Play : Pause"
+              :component="videoPaused ? Play : Pause"
               :size="11"
               class="shrink-0"
             />
-            <span>{{ store.videoWallpaper.paused ? "继续" : "暂停" }}</span>
+            <span>{{ videoPaused ? "继续" : "暂停" }}</span>
           </button>
           <!-- 静音 / 取消静音 -->
           <button
@@ -1134,6 +1207,62 @@ onUnmounted(() => {
             />
             <span>{{ store.videoMuted ? "取消静音" : "静音" }}</span>
           </button>
+        </div>
+
+        <!-- 自动暂停说明：暂停按钮此时是禁用态，光靠 title 提示不够 ——
+             用户看到一个灰掉的"继续"会以为坏了，这行负责把原因讲清楚。 -->
+        <div
+          v-if="store.videoWallpaper.autoPause"
+          class="mt-1 text-[10px] leading-snug text-amber-300/90"
+        >
+          已自动暂停：{{ autoPauseText }} · 条件解除后自动恢复
+        </div>
+
+        <!-- 最近自动暂停记录：只在真发生过时才出现，默认收起。
+             这是锁屏/电池这两类暂停**唯一可自查的痕迹** ——
+             它们发生时用户看不见桌面，画面暂停前后完全一样；
+             release 版又没有控制台，只能靠这份列表回答"刚才到底停过没有"。 -->
+        <div v-if="autoPauseHistory.length" class="mt-2 border-t border-line/60 pt-1.5">
+          <button
+            class="flex w-full cursor-pointer items-center gap-1.5 rounded px-0.5 py-0.5 text-[10.5px] text-faint transition-colors hover:text-tx"
+            :title="
+              historyExpanded
+                ? '收起自动暂停记录'
+                : `展开自动暂停记录（共 ${autoPauseHistory.length} 条，最多保留 20 条）`
+            "
+            @click="historyExpanded = !historyExpanded"
+          >
+            <NIcon :component="History" :size="12" class="shrink-0" />
+            <span class="shrink-0">自动暂停记录</span>
+            <span class="shrink-0 font-mono text-[10px] opacity-60">{{ autoPauseHistory.length }}</span>
+            <span class="flex-1"></span>
+            <NIcon
+              :component="ChevronDown"
+              :size="12"
+              class="shrink-0"
+              :class="historyExpanded ? 'rotate-180' : ''"
+              style="transition: transform 0.18s ease"
+            />
+          </button>
+          <div
+            v-if="historyExpanded"
+            class="mt-1 flex max-h-[104px] flex-col gap-0.5 overflow-y-auto pr-0.5"
+          >
+            <div
+              v-for="(r, i) in autoPauseHistory"
+              :key="`${r.started_at}-${i}`"
+              class="flex items-baseline gap-1.5 text-[10px] leading-relaxed"
+            >
+              <span class="shrink-0 font-mono text-faint">{{ formatHistoryTime(r.started_at) }}</span>
+              <span class="min-w-0 truncate text-dim">{{ AUTO_PAUSE_TEXT[r.reason] ?? r.reason }}</span>
+              <span
+                class="ml-auto shrink-0 font-mono"
+                :class="r.duration_ms === null ? 'text-amber-300/90' : 'text-dim'"
+              >
+                {{ formatHistoryDuration(r.duration_ms) }}
+              </span>
+            </div>
+          </div>
         </div>
 
         <!-- 动态壁纸播放范围：多显示器时才有意义。

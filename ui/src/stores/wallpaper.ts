@@ -151,17 +151,22 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
   // 动态壁纸状态（MVP：视频壁纸；后续 GIF/网页扩展 kind 分支）
   // monitors：生效的显示器下标；空数组 = 全部显示器
-  // paused：是否暂停（冻结当前帧）；**不持久化**，停止 / 换视频都会复位
+  // paused：**用户手动暂停**（冻结当前帧）；不持久化，停止 / 换视频都会复位
+  // autoPause：环境自动暂停原因（"fullscreen" | "battery" | "locked"），null = 无。
+  //   **与 paused 分开存**：手动暂停是用户意图、一直保持；自动暂停由后端巡检
+  //   每 4s 重算，条件消失自动恢复。混成一个字段就分不清"暂停是谁给的"。
   const videoWallpaper = ref<{
     enabled: boolean;
     path: string;
     monitors: number[];
     paused: boolean;
+    autoPause: string | null;
   }>({
     enabled: false,
     path: "",
     monitors: [],
     paused: false,
+    autoPause: null,
   });
 
   // 动态壁纸静音偏好（持久化）。
@@ -174,6 +179,32 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   // 它是静音的**唯一事实来源**：后端那份只是镜像（播放页读后端状态），
   // 每次 `setVideoWallpaper` 都会把这里的值带过去。
   const videoMuted = ref(readVideoMuted());
+
+  // 最近自动暂停历史（**最新在前**，后端最多留 20 条）。
+  //
+  // 存在的意义：锁屏 / 电池这两类暂停发生时用户看不见桌面，
+  // 画面"暂停过"与"一直在播"完全一样；release 版又没有控制台。
+  // 用户报"锁屏回来视频不对"时，这份列表是唯一能自查的证据。
+  //
+  // **不持久化**：它的用途是"刚才到底发生了什么"，
+  // 跨重启保留只会让一份过期流水账越积越多。
+  const autoPauseHistory = ref<
+    { reason: string; started_at: number; duration_ms: number | null }[]
+  >([]);
+
+  // 拉取自动暂停历史。失败时清空而不是保留旧值 ——
+  // 一份过期的暂停记录会让人误判"刚刚又锁屏了"。
+  async function loadAutoPauseHistory() {
+    try {
+      autoPauseHistory.value = (await invoke("get_auto_pause_history")) as {
+        reason: string;
+        started_at: number;
+        duration_ms: number | null;
+      }[];
+    } catch {
+      autoPauseHistory.value = [];
+    }
+  }
 
   // 显示器选择状态：availableMonitors 来自后端 list_monitors，
   // selectedMonitors 为空数组时语义为"全部显示器"（UI 上用"全部"开关表达）
@@ -1131,10 +1162,13 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       path: "",
       monitors: [],
       paused: false,
+      autoPause: null,
     };
     // 清除"上次生效项"：停止是明确的用户意图，
     // 不清掉的话下次启动会自作主张地又播起来。
     clearVideoActive();
+    // 后端在停止时会给最后一条未结束的记录补上时长，这里回拉一次让面板立刻反映。
+    void loadAutoPauseHistory();
   }
 
   // 某项是否为"当前正在播放的动态壁纸"（列表绿框 / 右侧状态展示共用）
@@ -1159,6 +1193,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
         path: string;
         monitors?: number[];
         paused?: boolean;
+        auto_pause?: string | null;
       };
       const monitors = Array.isArray(st.monitors) ? st.monitors : [];
       videoWallpaper.value = {
@@ -1166,12 +1201,35 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
         path: st.path || "",
         monitors,
         paused: !!st.paused,
+        autoPause: st.auto_pause ?? null,
       };
       // 恢复上次的显示器选择（空数组 = 全部）
       if (monitors.length) selectedMonitors.value = [...monitors];
     } catch {
       /* ignore */
     }
+    // 历史与 autoPause 是同一份后端状态的两个侧面，一起同步：
+    // 否则"在全屏里设壁纸"这种一上来就被暂停的情况，
+    // 历史里已经有记录、面板却不显示（事件回来时 autoPause 已是同一个值，
+    // `syncVideoAutoPause` 会提前 return）。
+    void loadAutoPauseHistory();
+  }
+
+  // 后端状态事件 → 只同步"环境自动暂停原因"。
+  //
+  // **刻意只写 autoPause**：
+  // - `paused` 是用户手动意图，`setVideoPaused` 已乐观更新；这里再写会与点击竞争；
+  // - `muted` 的事实来源是本地偏好（videoMuted），后端那份只是镜像；
+  // - `path` / `monitors` 由设置动作驱动，事件回声没有新信息。
+  // 自动暂停是**唯一**由后端巡检单方面发起的状态变化，所以也只有它需要走事件。
+  function syncVideoAutoPause(payload: { auto_pause?: string | null } | null) {
+    if (!payload) return;
+    const next = payload.auto_pause ?? null;
+    if (videoWallpaper.value.autoPause === next) return;
+    videoWallpaper.value = { ...videoWallpaper.value, autoPause: next };
+    // 后端是"先落历史、再广播"，所以这里回拉必定拿到含本次变化的新列表：
+    // 进入暂停时多一条"进行中"，解除时那条刚补上时长。
+    void loadAutoPauseHistory();
   }
 
   // 应用启动时**自动恢复**上次的动态壁纸：退出前设过、且没有被主动停止的话，
@@ -1423,6 +1481,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     isBingDownloaded,
     videoWallpaper,
     videoMuted,
+    autoPauseHistory,
     availableMonitors,
     selectedMonitors,
     activeMonitor,
@@ -1463,6 +1522,8 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     loadMonitors,
     stopVideoWallpaper,
     loadVideoWallpaperState,
+    syncVideoAutoPause,
+    loadAutoPauseHistory,
     restoreVideoWallpaper,
     setEffect,
     moveSourceOrder,
