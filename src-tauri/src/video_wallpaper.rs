@@ -65,6 +65,23 @@ const VIDEO_VIEW: &str = "index.html?view=video";
 /// 置底窗口重挂检测间隔（explorer 重启重建 WorkerW 后自动恢复）
 const RELINK_INTERVAL_SECS: u64 = 4;
 
+/// 播放速率的默认值与允许区间。
+///
+/// 上界不是审美问题，是**正确性约束**：播放页的交叉循环要求"提前量 > 淡出时长"，
+/// 两者在墙钟上都会随速率等比缩短（见 `VideoWallpaper.ts` 的 `crossStep`），
+/// 而交叉检测每 25ms 才轮询一次 —— 速率越高，留给淡出的余量越接近一个轮询周期。
+/// 3.0 是我们验证过还能稳定交叉的上限，再高就该去改轮询周期了。
+/// 下界只防误传 0/负数：0 会让视频停住、但状态仍显示"播放中"，最难排查。
+const DEFAULT_SPEED: f64 = 1.0;
+const SPEED_MIN: f64 = 0.25;
+const SPEED_MAX: f64 = 3.0;
+
+/// 速率是否可接受。`NaN` 必须显式挡掉 —— `NaN < a` 与 `NaN > b` 都是 false，
+/// 单靠区间比较会让它一路穿到 `playbackRate`，而那里赋值 NaN 会静默失效。
+fn is_valid_speed(speed: f64) -> bool {
+    speed.is_finite() && (SPEED_MIN..=SPEED_MAX).contains(&speed)
+}
+
 /// 下发给播放页的**状态事件名**。
 ///
 /// 换视频 / 静音 / 暂停 / 恢复 全部走这一条事件、携带完整状态快照。
@@ -315,6 +332,15 @@ struct VideoWallpaperState {
     /// 自动暂停原因（全屏应用 / 电池供电 / 会话锁定）。
     /// **不持久化**，由巡检每轮重算；`None` = 环境正常。
     auto_pause: AutoPause,
+    /// 播放速率（1.0 = 原速）。
+    ///
+    /// 与 `muted` 一样是**用户偏好**而非临时状态：换视频、改播放范围、停止
+    /// 动态壁纸都保留它。持久化落在前端 localStorage，每次 `set_video_wallpaper`
+    /// 带过来 —— 后端状态是进程内的，不带就会"上次 1.5 倍速、重启后又变回原速"。
+    ///
+    /// 注意它**不是**播放页的权威值：播放页收到状态后写 `video.playbackRate`。
+    /// 这里只负责保存与下发。
+    speed: f64,
 }
 
 fn state() -> &'static Mutex<VideoWallpaperState> {
@@ -327,6 +353,7 @@ fn state() -> &'static Mutex<VideoWallpaperState> {
             muted: false,
             paused: false,
             auto_pause: AutoPause::None,
+            speed: DEFAULT_SPEED,
         })
     })
 }
@@ -452,6 +479,8 @@ pub struct VideoWallpaperStateOut {
     /// `None` 表示未自动暂停。供主界面解释状态（播放页不需要）。
     /// 下发**标识**而非中文：文案归属前端，后端不掺和本地化。
     pub auto_pause: Option<&'static str>,
+    /// 播放速率（1.0 = 原速）。播放页收到后写 `video.playbackRate`。
+    pub speed: f64,
 }
 
 /// 显示器描述（供前端渲染选择列表）
@@ -1181,6 +1210,7 @@ fn state_out(s: &VideoWallpaperState) -> VideoWallpaperStateOut {
         paused: s.paused,
         effective_paused: s.paused || s.auto_pause != AutoPause::None,
         auto_pause: s.auto_pause.as_code(),
+        speed: s.speed,
     }
 }
 
@@ -1255,13 +1285,25 @@ fn emit_state_to_windows(app: &tauri::AppHandle) {
 ///
 /// `muted` 为静音偏好：传 `Some` 就采用（前端把持久化偏好带过来），
 /// 传 `None` 则沿用上一次的值 —— 只切播放范围时不会把静音状态弄丢。
+///
+/// `speed` 同理：传 `Some` 采用、传 `None` 沿用。**越界直接报错而不是钳制** ——
+/// 静默改掉用户传来的值，会让"前端显示 2.0×、实际按 1.0× 播"这种不一致
+/// 变成一件无从排查的事。
 #[tauri::command]
 pub async fn set_video_wallpaper(
     path: String,
     monitors: Option<Vec<usize>>,
     muted: Option<bool>,
+    speed: Option<f64>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    if let Some(s) = speed {
+        if !is_valid_speed(s) {
+            return Err(format!(
+                "不支持的播放速度：{s}（允许 {SPEED_MIN} ~ {SPEED_MAX}）"
+            ));
+        }
+    }
     let p = PathBuf::from(&path);
     if !p.is_file() {
         return Err(format!("视频文件不存在：{path}"));
@@ -1299,6 +1341,7 @@ pub async fn set_video_wallpaper(
         // 只改播放范围 → 保持暂停（用户是暂停着在调整范围，不该被偷偷恢复）。
         paused: if path_changed { false } else { prev.paused },
         auto_pause,
+        speed: speed.unwrap_or(prev.speed),
     };
 
     // 与巡检走同一条记录路径：设壁纸时就已处在全屏/电池里，
@@ -1353,6 +1396,25 @@ pub async fn set_video_wallpaper_muted(
     state().lock().unwrap().muted = muted;
     // 不做"值没变就跳过"的短路：幂等广播代价极低，
     // 而一旦状态因任何原因漂移，短路会让它永远修不回来。
+    emit_state_to_windows(&app);
+    Ok(())
+}
+
+/// 播放速率：**不重建窗口、不 seek**，只让播放页改 `playbackRate`。
+///
+/// 与换视频的区别很关键：换视频要重载元素（必然有一次黑场），而改速率
+/// 只是给已经在播的元素赋个值 —— 画面连续、当前位置不跳，用户看不到接缝。
+#[tauri::command]
+pub async fn set_video_wallpaper_speed(
+    speed: f64,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    if !is_valid_speed(speed) {
+        return Err(format!(
+            "不支持的播放速度：{speed}（允许 {SPEED_MIN} ~ {SPEED_MAX}）"
+        ));
+    }
+    state().lock().unwrap().speed = speed;
     emit_state_to_windows(&app);
     Ok(())
 }
@@ -1611,6 +1673,8 @@ pub async fn stop_video_wallpaper(app: tauri::AppHandle) -> Result<(), String> {
     {
         let mut s = state().lock().unwrap();
         let muted = s.muted;
+        // 速率与静音一样是长期偏好，停止不该忘掉它
+        let speed = s.speed;
         *s = VideoWallpaperState {
             enabled: false,
             path: String::new(),
@@ -1619,6 +1683,7 @@ pub async fn stop_video_wallpaper(app: tauri::AppHandle) -> Result<(), String> {
             paused: false,
             // 停止即清空自动暂停：下次启用时会重新评估，留着旧值会让新壁纸一上来就静止
             auto_pause: AutoPause::None,
+            speed,
         };
     }
     // 巡检此后会在 `hwnds.is_empty()` 处短路、不再写历史，

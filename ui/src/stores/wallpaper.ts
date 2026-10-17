@@ -16,6 +16,8 @@ import {
   PAGE_SIZE,
   VIDEO_ACTIVE_KEY,
   VIDEO_MUTED_KEY,
+  VIDEO_SPEEDS,
+  VIDEO_SPEED_KEY,
   isVideoPath,
   isWebviewPlayable,
   type WallpaperEntryData,
@@ -56,6 +58,21 @@ function readVideoMuted(): boolean {
     return localStorage.getItem(VIDEO_MUTED_KEY) === "1";
   } catch {
     return false;
+  }
+}
+
+/// 读取持久化的播放速率偏好。
+///
+/// **必须校验取值是否在 `VIDEO_SPEEDS` 里**，而不是"能解析成数字就用"：
+/// 旧版本残留、手改 localStorage、甚至把后端上限 3.0 写进去，
+/// 都会让 UI 上的速率高亮一个都点不亮（没有任何一项匹配），
+/// 看起来像"速度设置坏了"。非法值一律回退 1.0。
+function readVideoSpeed(): number {
+  try {
+    const n = Number(localStorage.getItem(VIDEO_SPEED_KEY));
+    return (VIDEO_SPEEDS as readonly number[]).includes(n) ? n : 1;
+  } catch {
+    return 1;
   }
 }
 
@@ -179,6 +196,12 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   // 它是静音的**唯一事实来源**：后端那份只是镜像（播放页读后端状态），
   // 每次 `setVideoWallpaper` 都会把这里的值带过去。
   const videoMuted = ref(readVideoMuted());
+
+  // 动态壁纸播放速率偏好（持久化）。
+  //
+  // 与 videoMuted 完全同一性质，因此同样**独立于 videoWallpaper**：
+  // 那个对象每次停止/重载都会被整体重置，速率偏好不该跟着一起丢。
+  const videoSpeed = ref(readVideoSpeed());
 
   // 最近自动暂停历史（**最新在前**，后端最多留 20 条）。
   //
@@ -1060,6 +1083,8 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
         // 回到默认值，而播放页读的是后端状态 —— 不带过去就会"上次静音了、
         // 这次启用又有声音"。
         muted: videoMuted.value,
+        // 速率同理：不带的话重启后第一次设壁纸会掉回原速
+        speed: videoSpeed.value,
       });
       // 设完回读一次后端状态，而不是在本地拼一份：
       // `paused` 的取舍规则（换视频复位、只改播放范围保持）只写在后端一处，
@@ -1113,6 +1138,38 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     } catch (err: unknown) {
       toast(
         "静音设置失败：" + ((err as Error)?.message || String(err)),
+        "error"
+      );
+      return false;
+    }
+  }
+
+  // 切换播放速率。与静音同样是"一次写三处"：
+  //   ① 本地偏好 ref ② localStorage ③ 后端（后端广播给置底窗口）
+  //
+  // **不做乐观更新的回滚**：失败时保持用户点的值反而更糟 ——
+  // 界面显示 2×、实际按 1× 播，比"点不动"更难发现。
+  // 所以失败时把 ref 改回去，让 UI 与真实播放速率一致。
+  async function setVideoSpeed(speed: number): Promise<boolean> {
+    const prev = videoSpeed.value;
+    videoSpeed.value = speed;
+    try {
+      localStorage.setItem(VIDEO_SPEED_KEY, String(speed));
+    } catch {
+      /* 存储不可用时只影响"下次是否记得"，不影响本次播放 */
+    }
+    try {
+      await invoke("set_video_wallpaper_speed", { speed });
+      return true;
+    } catch (err: unknown) {
+      videoSpeed.value = prev;
+      try {
+        localStorage.setItem(VIDEO_SPEED_KEY, String(prev));
+      } catch {
+        /* ignore */
+      }
+      toast(
+        "播放速度设置失败：" + ((err as Error)?.message || String(err)),
         "error"
       );
       return false;
@@ -1183,9 +1240,9 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
   // 启动/恢复主界面时同步动态壁纸状态（播放页挂载也用它拉取兜底）
   //
-  // **刻意不读后端的 muted**：静音的事实来源是本地偏好（videoMuted），
-  // 后端那份只是它的镜像。若在这里用后端的值覆盖本地偏好，
-  // 应用重启后（后端 muted 回到默认 false）就会把用户上次的静音选择抹掉。
+  // **刻意不读后端的 muted / speed**：这两项的事实来源都是本地偏好，
+  // 后端那份只是镜像。若在这里用后端的值覆盖本地偏好，
+  // 应用重启后（后端回到默认值）就会把用户上次的选择抹掉。
   async function loadVideoWallpaperState() {
     try {
       const st = (await invoke("get_video_wallpaper_state")) as {
@@ -1518,6 +1575,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     setVideoWallpaper,
     applyVideoMonitors,
     setVideoMuted,
+    setVideoSpeed,
     setVideoPaused,
     loadMonitors,
     stopVideoWallpaper,

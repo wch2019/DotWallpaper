@@ -112,6 +112,22 @@ export type AutostartWindowMode = "silent" | "window"; // 开机启动后：sile
 /// 存它没有意义），静音则希望"下次设动态壁纸还是静的"。
 export const VIDEO_MUTED_KEY = "dot-wallpaper-video-muted";
 
+/// 动态壁纸播放速率偏好的 localStorage 键（值形如 "1.5"）。
+///
+/// 与静音同一性质：**偏好**，不是本次播放的临时状态 ——
+/// 换视频、改播放范围、停止动态壁纸都该保留"我习惯 1.5 倍速"。
+export const VIDEO_SPEED_KEY = "dot-wallpaper-video-speed";
+
+/// 可选的播放速率。**顺序即 UI 顺序**，1.0 在中间便于一眼找到默认值。
+///
+/// 刻意不做滑块：速率是离散的观感选择（0.75 与 0.8 肉眼无差），
+/// 连续值只会让人反复微调，还得额外处理"取整到两位小数"的显示问题。
+///
+/// 上界 2.0 是**保守取值**：后端允许到 3.0，但交叉循环在高速下留给淡出的
+/// 余量会被压得很薄（见 `VideoWallpaper.vue` 的 `crossStep`），
+/// 与其让用户踩到 3 倍速的接缝，不如只提供稳定区间。
+export const VIDEO_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
+
 /// 动态壁纸"上次生效项"的 localStorage 键（值 JSON：`{ path, monitors }`）。
 ///
 /// 用于**应用重启后自动恢复桌面动态壁纸**：后端状态是进程内的，重启即清空，

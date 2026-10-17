@@ -34,6 +34,8 @@ const hintVisible = ref(true);
 const muted = ref(false);
 /// 是否暂停：暂停时冻结当前帧（不销毁窗口、不回退到静态壁纸），恢复时从原处继续
 const paused = ref(false);
+/// 播放速率（1 = 原速）。由主界面下发，播放页只负责应用。
+const speed = ref(1);
 /// 两个上下叠放、交替承担播放的视频元素
 const videoA = ref<HTMLVideoElement | null>(null);
 const videoB = ref<HTMLVideoElement | null>(null);
@@ -113,6 +115,23 @@ const TOP_OPACITY = "0.999";
 
 function elOf(i: number): HTMLVideoElement | null {
   return (i === 0 ? videoA.value : videoB.value) ?? null;
+}
+
+/// 把播放速率应用到两个元素。
+///
+/// **必须同时写 `defaultPlaybackRate`**：换源会触发一次元素重载，
+/// 而重载会把 `playbackRate` 重置回 `defaultPlaybackRate`（默认 1）。
+/// 只写前者的话，换个视频就悄悄掉回原速 —— 而界面还显示着 1.5×，
+/// 用户只会觉得"这个设置时灵时不灵"，极难定位。
+///
+/// 改速率**不会** seek、也不会中断播放，所以可以随时无条件调用。
+function applyRate() {
+  const r = Number.isFinite(speed.value) && speed.value > 0 ? speed.value : 1;
+  for (const el of [videoA.value, videoB.value]) {
+    if (!el) continue;
+    el.defaultPlaybackRate = r;
+    el.playbackRate = r;
+  }
 }
 
 /// 起播。**失败时必须留下痕迹** ——
@@ -249,7 +268,21 @@ function crossStep() {
   //    而**没有被遮挡裁剪**，帧一直是提交着的）。
   //    合成结果 = (1-α)·上层 + α·下层 —— 线性、亮度恒定、不会往黑里沉。
   crossing = true;
-  const fadeMs = Math.round(crossFade * 1000);
+  // 淡出时长要按速率换算。
+  //
+  // `crossLead` / `crossFade` 都是**内容秒**（与 `currentTime` 同一单位），
+  // 而淡出动画是**墙钟**。速率 ≠ 1 时两者脱钩：2× 下 0.5 内容秒的提前量
+  // 只剩 250ms 墙钟，却仍安排 400ms 淡出 → 上层在淡出走完之前就播到结尾、
+  // 冻在最后一帧与新画面混着，观感就是"循环点卡一下"。
+  //
+  // 再扣两个轮询周期：`crossStep` 每 25ms 才检查一次，触发本身就是迟到的，
+  // 迟到的时间必须从淡出里让出来。两处都做，才能在 0.5×~2× 全域保持
+  // "上层一定活到淡出结束"。
+  const leadWallMs = (crossLead / speed.value) * 1000;
+  const fadeMs = Math.max(
+    60,
+    Math.round(Math.min((crossFade / speed.value) * 1000, leadWallMs - CROSS_POLL_MS * 2))
+  );
   cur.style.transition = `opacity ${fadeMs}ms linear`;
   cur.style.opacity = "0";
 
@@ -393,6 +426,8 @@ function onLoadedMetadata() {
     crossFade = CROSS_FADE_MAX;
   }
   resetElements();
+  // 重载会重置 `playbackRate`，这里补一次（`applyRate` 幂等、无副作用）
+  applyRate();
   startLoop();
   if (!paused.value) tryPlay(a);
 }
@@ -411,6 +446,8 @@ interface VideoState {
   paused: boolean;
   /** 有效暂停 = 手动 || 环境自动暂停（全屏 / 电池 / 锁屏）。**播放页只认这一位** */
   effective_paused: boolean;
+  /** 播放速率（1 = 原速） */
+  speed: number;
 }
 
 /// 把静音 / 暂停应用到两个视频元素。
@@ -439,6 +476,10 @@ function applyState(st: VideoState) {
   // 环境自动暂停（全屏游戏 / 电池 / 锁屏）必须同样冻结画面。
   // 播放页因此不需要知道暂停是谁触发的 —— 后端已经合成好这一位。
   paused.value = !!st.effective_paused;
+  // 速率**无条件写**：改速率不 seek、不重建、不打断播放，代价只有两次属性赋值。
+  // 加"值没变就跳过"的短路反而会在"元素刚被重建、ref 却还是旧值"时漏掉应用。
+  speed.value = Number.isFinite(st.speed) && st.speed > 0 ? st.speed : 1;
+  applyRate();
   // 已停止：`stop_video_wallpaper` 是直接关窗、不发事件，所以正常收不到这一支；
   // 但万一"停止"与"建窗"并发、窗口活了下来，冻结画面总好过继续播一个
   // 已经被取消的壁纸。

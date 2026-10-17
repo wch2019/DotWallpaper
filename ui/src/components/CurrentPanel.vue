@@ -14,6 +14,7 @@ import {
   isRemoteSrc,
   isWebviewPlayable,
   useWallpaperStore,
+  VIDEO_SPEEDS,
   type WallpaperItem,
 } from "../stores/wallpaper";
 import { invoke } from "@tauri-apps/api/core";
@@ -546,6 +547,14 @@ function formatHistoryDuration(ms: number | null): string {
 // 每次都弹一条只会糊住界面；失败仍由 store 统一报错。
 async function onToggleVideoMuted() {
   await store.setVideoMuted(!store.videoMuted);
+}
+
+// 播放速度：直接切换，**成功时不给 toast** —— 高亮本身就是反馈，
+// 而且用户常常连点几档试手感，每点一次弹一条只会糊住界面。
+// 失败仍由 store 统一报错，并把高亮回滚到真实生效的那一档。
+async function onSetVideoSpeed(speed: number) {
+  if (store.videoSpeed === speed) return;
+  await store.setVideoSpeed(speed);
 }
 
 // ---- 显示器选择 ----
@@ -1206,6 +1215,29 @@ onUnmounted(() => {
               class="shrink-0"
             />
             <span>{{ store.videoMuted ? "取消静音" : "静音" }}</span>
+          </button>
+        </div>
+
+        <!-- 播放速度：离散档位而不是滑块。
+             速率是观感选择（0.75 与 0.8 肉眼无差），连续值只会让人反复微调，
+             还得额外处理"取整到两位小数"的显示问题。
+             档位与 `VIDEO_SPEEDS` 一一对应 —— 后端允许到 3.0，但交叉循环
+             在高速下留给淡出的余量会被压得很薄，这里只提供稳定区间。 -->
+        <div class="mt-1.5 flex items-center gap-1">
+          <span class="shrink-0 text-[10px] text-faint">速度</span>
+          <button
+            v-for="s in VIDEO_SPEEDS"
+            :key="s"
+            class="flex-1 cursor-pointer rounded border py-[3px] text-center font-mono text-[10px] transition-colors"
+            :class="
+              store.videoSpeed === s
+                ? 'border-accent/50 bg-accent-soft text-accent'
+                : 'border-line-2 text-dim hover:border-white/25 hover:bg-white/10 hover:text-tx'
+            "
+            :title="`以 ${s} 倍速播放`"
+            @click="onSetVideoSpeed(s)"
+          >
+            {{ s }}×
           </button>
         </div>
 

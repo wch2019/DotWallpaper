@@ -807,6 +807,7 @@ fn main() {
             apply_autostart_window_pref,
             video_wallpaper::set_video_wallpaper,
             video_wallpaper::set_video_wallpaper_muted,
+            video_wallpaper::set_video_wallpaper_speed,
             video_wallpaper::set_video_wallpaper_paused,
             video_wallpaper::stop_video_wallpaper,
             video_wallpaper::get_video_wallpaper_state,
