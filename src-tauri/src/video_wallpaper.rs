@@ -82,6 +82,37 @@ fn is_valid_speed(speed: f64) -> bool {
     speed.is_finite() && (SPEED_MIN..=SPEED_MAX).contains(&speed)
 }
 
+/// 循环模式。
+///
+/// **刻意不提供"往复播放"**：HTML5 的 `playbackRate` 不接受负值，
+/// Chromium 没有反向解码能力。想做出倒放只能靠逐帧 seek ——
+/// 那是每帧一次随机访问，4K 素材上必然掉帧，与"无感循环"的目标正好相反。
+/// 与其给一个看起来有、用起来卡的选项，不如只留两个真能跑好的。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LoopMode {
+    /// 循环播放（默认）
+    Loop,
+    /// 播到结尾就停住，冻结在最后一帧
+    Once,
+}
+
+impl LoopMode {
+    fn as_code(self) -> &'static str {
+        match self {
+            LoopMode::Loop => "loop",
+            LoopMode::Once => "once",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "loop" => Some(LoopMode::Loop),
+            "once" => Some(LoopMode::Once),
+            _ => None,
+        }
+    }
+}
+
 /// 下发给播放页的**状态事件名**。
 ///
 /// 换视频 / 静音 / 暂停 / 恢复 全部走这一条事件、携带完整状态快照。
@@ -341,6 +372,14 @@ struct VideoWallpaperState {
     /// 注意它**不是**播放页的权威值：播放页收到状态后写 `video.playbackRate`。
     /// 这里只负责保存与下发。
     speed: f64,
+    /// 循环模式（循环 / 只播一次）。
+    loop_mode: LoopMode,
+    /// 片段循环的起止（秒）。`clip_end == 0.0` 表示"到结尾"。
+    ///
+    /// **换视频时复位**（与 `paused` 同一条规则）：秒数是针对某一段片子的，
+    /// 换到另一个长度的视频上，"第 12 秒到第 30 秒"很可能已经越界。
+    clip_start: f64,
+    clip_end: f64,
 }
 
 fn state() -> &'static Mutex<VideoWallpaperState> {
@@ -354,6 +393,9 @@ fn state() -> &'static Mutex<VideoWallpaperState> {
             paused: false,
             auto_pause: AutoPause::None,
             speed: DEFAULT_SPEED,
+            loop_mode: LoopMode::Loop,
+            clip_start: 0.0,
+            clip_end: 0.0,
         })
     })
 }
@@ -481,6 +523,14 @@ pub struct VideoWallpaperStateOut {
     pub auto_pause: Option<&'static str>,
     /// 播放速率（1.0 = 原速）。播放页收到后写 `video.playbackRate`。
     pub speed: f64,
+    /// 循环模式标识：`"loop"` / `"once"`
+    pub loop_mode: &'static str,
+    /// 片段循环起点（秒）
+    pub clip_start: f64,
+    /// 片段循环终点（秒）。**`0.0` 表示"到结尾"** ——
+    /// 后端不知道视频时长（那是解码器的事），只能用一个哨兵值表达"不设终点"。
+    /// 播放页拿到 0 会替换成 `duration`，见其 `effectiveEnd()`。
+    pub clip_end: f64,
 }
 
 /// 显示器描述（供前端渲染选择列表）
@@ -1211,6 +1261,9 @@ fn state_out(s: &VideoWallpaperState) -> VideoWallpaperStateOut {
         effective_paused: s.paused || s.auto_pause != AutoPause::None,
         auto_pause: s.auto_pause.as_code(),
         speed: s.speed,
+        loop_mode: s.loop_mode.as_code(),
+        clip_start: s.clip_start,
+        clip_end: s.clip_end,
     }
 }
 
@@ -1295,6 +1348,7 @@ pub async fn set_video_wallpaper(
     monitors: Option<Vec<usize>>,
     muted: Option<bool>,
     speed: Option<f64>,
+    loop_mode: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     if let Some(s) = speed {
@@ -1304,6 +1358,15 @@ pub async fn set_video_wallpaper(
             ));
         }
     }
+    // 循环模式随 set 一起带过来（与 muted / speed 同一套"偏好随设置走"的规则），
+    // 否则应用重启后第一次设壁纸会悄悄掉回"循环"。
+    let loop_mode = match loop_mode.as_deref() {
+        None => None,
+        Some(code) => Some(
+            LoopMode::parse(code)
+                .ok_or_else(|| format!("不支持的循环模式：{code}（只接受 loop / once）"))?,
+        ),
+    };
     let p = PathBuf::from(&path);
     if !p.is_file() {
         return Err(format!("视频文件不存在：{path}"));
@@ -1342,6 +1405,12 @@ pub async fn set_video_wallpaper(
         paused: if path_changed { false } else { prev.paused },
         auto_pause,
         speed: speed.unwrap_or(prev.speed),
+        // 循环模式是**偏好**（"我就喜欢它只播一次"），换片子保留；
+        // 片段秒数则绑死在某一段素材上，换片必须复位 —— 否则
+        // "第 12~30 秒" 落到一个只有 8 秒的新视频上，播放页只能 clamp 成空区间。
+        loop_mode: loop_mode.unwrap_or(prev.loop_mode),
+        clip_start: if path_changed { 0.0 } else { prev.clip_start },
+        clip_end: if path_changed { 0.0 } else { prev.clip_end },
     };
 
     // 与巡检走同一条记录路径：设壁纸时就已处在全屏/电池里，
@@ -1415,6 +1484,53 @@ pub async fn set_video_wallpaper_speed(
         ));
     }
     state().lock().unwrap().speed = speed;
+    emit_state_to_windows(&app);
+    Ok(())
+}
+
+/// 循环模式：`"loop"` 循环 / `"once"` 只播一次。
+///
+/// 只改状态、不碰窗口。播放页据此决定"到结尾是回绕还是停住"，
+/// 交叉循环本身不必重建 —— 模式切换只是让 `crossStep` 换一条分支。
+#[tauri::command]
+pub async fn set_video_wallpaper_loop_mode(
+    loop_mode: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let mode = LoopMode::parse(&loop_mode)
+        .ok_or_else(|| format!("不支持的循环模式：{loop_mode}（只接受 loop / once）"))?;
+    state().lock().unwrap().loop_mode = mode;
+    emit_state_to_windows(&app);
+    Ok(())
+}
+
+/// 片段循环区间（秒）。`clip_end = 0` 表示"到结尾"。
+///
+/// **校验放在后端而不是只在前端做**：这是唯一能保证"状态里不会存进
+/// 一个 end <= start 的区间"的地方。前端算错、或旧 localStorage 残留，
+/// 后端不拦的话播放页会拿到一个空区间，表现为"视频不动了"，很难查。
+#[tauri::command]
+pub async fn set_video_wallpaper_clip(
+    clip_start: f64,
+    clip_end: f64,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    if !clip_start.is_finite() || !clip_end.is_finite() {
+        return Err("片段起止时间必须是有效数字".into());
+    }
+    if clip_start < 0.0 || clip_end < 0.0 {
+        return Err("片段起止时间不能为负".into());
+    }
+    if clip_end > 0.0 && clip_end <= clip_start {
+        return Err(format!(
+            "片段结束时间（{clip_end} 秒）必须大于开始时间（{clip_start} 秒）"
+        ));
+    }
+    {
+        let mut s = state().lock().unwrap();
+        s.clip_start = clip_start;
+        s.clip_end = clip_end;
+    }
     emit_state_to_windows(&app);
     Ok(())
 }
@@ -1675,6 +1791,8 @@ pub async fn stop_video_wallpaper(app: tauri::AppHandle) -> Result<(), String> {
         let muted = s.muted;
         // 速率与静音一样是长期偏好，停止不该忘掉它
         let speed = s.speed;
+        // 循环模式同理；片段区间跟随当前视频，停止后清空
+        let loop_mode = s.loop_mode;
         *s = VideoWallpaperState {
             enabled: false,
             path: String::new(),
@@ -1684,6 +1802,9 @@ pub async fn stop_video_wallpaper(app: tauri::AppHandle) -> Result<(), String> {
             // 停止即清空自动暂停：下次启用时会重新评估，留着旧值会让新壁纸一上来就静止
             auto_pause: AutoPause::None,
             speed,
+            loop_mode,
+            clip_start: 0.0,
+            clip_end: 0.0,
         };
     }
     // 巡检此后会在 `hwnds.is_empty()` 处短路、不再写历史，

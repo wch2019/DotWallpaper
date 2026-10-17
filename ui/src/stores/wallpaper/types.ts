@@ -128,6 +128,17 @@ export const VIDEO_SPEED_KEY = "dot-wallpaper-video-speed";
 /// 与其让用户踩到 3 倍速的接缝，不如只提供稳定区间。
 export const VIDEO_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
 
+/// 循环模式偏好的 localStorage 键（值 "loop" / "once"）。
+///
+/// 与静音、速率同属**偏好**：换视频、停止、重启都该保留
+/// "我只想让它播一遍"这种口味。
+export const VIDEO_LOOP_KEY = "dot-wallpaper-video-loop";
+
+/// 循环模式。刻意**没有 "pingpong"（往复）**：
+/// HTML5 的 `playbackRate` 不接受负值，Chromium 没有反向解码能力，
+/// 倒放只能靠逐帧 seek —— 4K 素材上必然掉帧，与"无感循环"的目标正好相反。
+export type VideoLoopMode = "loop" | "once";
+
 /// 动态壁纸"上次生效项"的 localStorage 键（值 JSON：`{ path, monitors }`）。
 ///
 /// 用于**应用重启后自动恢复桌面动态壁纸**：后端状态是进程内的，重启即清空，

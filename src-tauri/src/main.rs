@@ -808,6 +808,8 @@ fn main() {
             video_wallpaper::set_video_wallpaper,
             video_wallpaper::set_video_wallpaper_muted,
             video_wallpaper::set_video_wallpaper_speed,
+            video_wallpaper::set_video_wallpaper_loop_mode,
+            video_wallpaper::set_video_wallpaper_clip,
             video_wallpaper::set_video_wallpaper_paused,
             video_wallpaper::stop_video_wallpaper,
             video_wallpaper::get_video_wallpaper_state,

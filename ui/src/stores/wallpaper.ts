@@ -18,6 +18,8 @@ import {
   VIDEO_MUTED_KEY,
   VIDEO_SPEEDS,
   VIDEO_SPEED_KEY,
+  VIDEO_LOOP_KEY,
+  type VideoLoopMode,
   isVideoPath,
   isWebviewPlayable,
   type WallpaperEntryData,
@@ -73,6 +75,17 @@ function readVideoSpeed(): number {
     return (VIDEO_SPEEDS as readonly number[]).includes(n) ? n : 1;
   } catch {
     return 1;
+  }
+}
+
+/// 读取持久化的循环模式偏好。非法值一律回退 "loop" ——
+/// 与 `readLocalSort` 同一条规则：下拉/高亮里出现一个不在选项里的值，
+/// 表现就是"一个都不亮"，比回退成默认值更难懂。
+function readVideoLoop(): VideoLoopMode {
+  try {
+    return localStorage.getItem(VIDEO_LOOP_KEY) === "once" ? "once" : "loop";
+  } catch {
+    return "loop";
   }
 }
 
@@ -202,6 +215,16 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   // 与 videoMuted 完全同一性质，因此同样**独立于 videoWallpaper**：
   // 那个对象每次停止/重载都会被整体重置，速率偏好不该跟着一起丢。
   const videoSpeed = ref(readVideoSpeed());
+
+  // 循环模式偏好（持久化）。与静音、速率同一性质。
+  const videoLoop = ref<VideoLoopMode>(readVideoLoop());
+
+  // 片段循环区间（秒）。**不持久化、也不跨视频保留** ——
+  // 秒数绑死在某一段素材上，换到另一个长度的视频上就是无意义的数字。
+  // 它是**后端状态**而非偏好，因此由 `loadVideoWallpaperState` 回读，
+  // 前端只做展示与提交；后端在换视频时会把它复位成 0。
+  const videoClipStart = ref(0);
+  const videoClipEnd = ref(0);
 
   // 最近自动暂停历史（**最新在前**，后端最多留 20 条）。
   //
@@ -1085,6 +1108,8 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
         muted: videoMuted.value,
         // 速率同理：不带的话重启后第一次设壁纸会掉回原速
         speed: videoSpeed.value,
+        // 循环模式也是偏好，一起带过去
+        loopMode: videoLoop.value,
       });
       // 设完回读一次后端状态，而不是在本地拼一份：
       // `paused` 的取舍规则（换视频复位、只改播放范围保持）只写在后端一处，
@@ -1176,6 +1201,51 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     }
   }
 
+  // 切换循环模式。同样是"一次写三处"（ref / localStorage / 后端）。
+  async function setVideoLoop(mode: VideoLoopMode): Promise<boolean> {
+    const prev = videoLoop.value;
+    videoLoop.value = mode;
+    try {
+      localStorage.setItem(VIDEO_LOOP_KEY, mode);
+    } catch {
+      /* 存储不可用时只影响"下次是否记得" */
+    }
+    try {
+      await invoke("set_video_wallpaper_loop_mode", { loopMode: mode });
+      return true;
+    } catch (err: unknown) {
+      videoLoop.value = prev;
+      toast(
+        "循环模式设置失败：" + ((err as Error)?.message || String(err)),
+        "error"
+      );
+      return false;
+    }
+  }
+
+  // 设置片段循环区间。`end = 0` 表示"到结尾"。
+  //
+  // **不做乐观更新**：区间合法性由后端校验（end 必须大于 start），
+  // 前端先写会让界面短暂显示一个非法区间，随后又被错误提示打回。
+  // 成功后以后端广播回来的值为准。
+  async function setVideoClip(start: number, end: number): Promise<boolean> {
+    try {
+      await invoke("set_video_wallpaper_clip", {
+        clipStart: start,
+        clipEnd: end,
+      });
+      videoClipStart.value = start;
+      videoClipEnd.value = end;
+      return true;
+    } catch (err: unknown) {
+      toast(
+        "片段设置失败：" + ((err as Error)?.message || String(err)),
+        "error"
+      );
+      return false;
+    }
+  }
+
   // 暂停 / 恢复动态壁纸：冻结当前帧（**不销毁置底窗口**，桌面不会退回静态壁纸），
   // 恢复时从暂停处继续。与 stopVideoWallpaper 的区别见其注释。
   async function setVideoPaused(paused: boolean): Promise<boolean> {
@@ -1224,6 +1294,9 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     // 清除"上次生效项"：停止是明确的用户意图，
     // 不清掉的话下次启动会自作主张地又播起来。
     clearVideoActive();
+    // 片段区间跟着当前视频走，停止后一并清空（后端也复位了）
+    videoClipStart.value = 0;
+    videoClipEnd.value = 0;
     // 后端在停止时会给最后一条未结束的记录补上时长，这里回拉一次让面板立刻反映。
     void loadAutoPauseHistory();
   }
@@ -1240,9 +1313,12 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
   // 启动/恢复主界面时同步动态壁纸状态（播放页挂载也用它拉取兜底）
   //
-  // **刻意不读后端的 muted / speed**：这两项的事实来源都是本地偏好，
+  // **刻意不读后端的 muted / speed / loop_mode**：这三项的事实来源都是本地偏好，
   // 后端那份只是镜像。若在这里用后端的值覆盖本地偏好，
   // 应用重启后（后端回到默认值）就会把用户上次的选择抹掉。
+  //
+  // 片段区间是**例外**：它绑在当前这段视频上、不是偏好，而且后端在换视频时
+  // 会把它复位 —— 所以必须回读，否则换完视频界面上还显示着上一段的秒数。
   async function loadVideoWallpaperState() {
     try {
       const st = (await invoke("get_video_wallpaper_state")) as {
@@ -1251,6 +1327,8 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
         monitors?: number[];
         paused?: boolean;
         auto_pause?: string | null;
+        clip_start?: number;
+        clip_end?: number;
       };
       const monitors = Array.isArray(st.monitors) ? st.monitors : [];
       videoWallpaper.value = {
@@ -1260,6 +1338,8 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
         paused: !!st.paused,
         autoPause: st.auto_pause ?? null,
       };
+      videoClipStart.value = Number(st.clip_start) || 0;
+      videoClipEnd.value = Number(st.clip_end) || 0;
       // 恢复上次的显示器选择（空数组 = 全部）
       if (monitors.length) selectedMonitors.value = [...monitors];
     } catch {
@@ -1576,6 +1656,8 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     applyVideoMonitors,
     setVideoMuted,
     setVideoSpeed,
+    setVideoLoop,
+    setVideoClip,
     setVideoPaused,
     loadMonitors,
     stopVideoWallpaper,

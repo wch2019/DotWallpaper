@@ -557,6 +557,68 @@ async function onSetVideoSpeed(speed: number) {
   await store.setVideoSpeed(speed);
 }
 
+// ---------- 循环模式 / 片段循环 ----------
+const LOOP_OPTIONS = [
+  { key: "loop", label: "循环", hint: "播到结尾自动接回开头（交叉淡化，无感）" },
+  { key: "once", label: "单次", hint: "播完停在最后一帧，不重播（省一半解码）" },
+] as const;
+
+async function onSetVideoLoop(mode: "loop" | "once") {
+  if (store.videoLoop === mode) return;
+  await store.setVideoLoop(mode);
+}
+
+// 片段输入用**字符串**而不是 number：`v-model.number` 在用户刚敲下
+// "0." 或清空时会得到 NaN，导致输入框自己跳回 0，根本没法输入小数。
+const clipStartInput = ref("");
+const clipEndInput = ref("");
+
+// 后端是片段区间的权威来源（换视频时会复位成 0），因此跟着 store 走。
+// 用 watch 而不是初始赋值：换视频、停止、失败回滚都要能刷新输入框。
+watch(
+  () => [store.videoClipStart, store.videoClipEnd] as const,
+  ([s, e]) => {
+    clipStartInput.value = s > 0 ? String(s) : "";
+    clipEndInput.value = e > 0 ? String(e) : "";
+  },
+  { immediate: true }
+);
+
+/// 输入中的区间是否非法（结束不晚于开始）。用来就地提示，
+/// 免得用户敲完按回车才收到一条 toast 说不行。
+const clipInvalid = computed(() => {
+  const s = parseFloat(clipStartInput.value) || 0;
+  const e = parseFloat(clipEndInput.value) || 0;
+  return e > 0 && e <= s;
+});
+
+const clipActive = computed(
+  () => store.videoClipStart > 0 || store.videoClipEnd > 0
+);
+
+/// 提交片段区间。空 / 非数字 / 0 一律当作"不设限"（开始=0，结束=到结尾）。
+async function commitClip() {
+  if (clipInvalid.value) return;
+  const s = parseFloat(clipStartInput.value);
+  const e = parseFloat(clipEndInput.value);
+  const start = Number.isFinite(s) && s > 0 ? s : 0;
+  const end = Number.isFinite(e) && e > 0 ? e : 0;
+  if (start === store.videoClipStart && end === store.videoClipEnd) return;
+  const ok = await store.setVideoClip(start, end);
+  if (!ok) {
+    // 失败：输入框退回真实生效的值，否则界面会一直显示一个没生效的区间
+    clipStartInput.value = store.videoClipStart > 0 ? String(store.videoClipStart) : "";
+    clipEndInput.value = store.videoClipEnd > 0 ? String(store.videoClipEnd) : "";
+  }
+}
+
+async function onResetClip() {
+  clipStartInput.value = "";
+  clipEndInput.value = "";
+  if (!clipActive.value) return;
+  await store.setVideoClip(0, 0);
+}
+
 // ---- 显示器选择 ----
 // 语义：selected 为空数组 = 全部显示器（用"全部"开关表达，UI 更直观）
 type MonitorItem = (typeof store.availableMonitors)[number];
@@ -1241,6 +1303,77 @@ onUnmounted(() => {
           </button>
         </div>
 
+        <!-- 循环模式：只提供"循环 / 单次"。
+             **刻意没有"往复"**：HTML5 的 playbackRate 不接受负值，
+             Chromium 没有反向解码能力，倒放只能逐帧 seek —— 4K 素材上必然掉帧，
+             与"无感循环"的目标正好相反。与其给个看着有、用起来卡的选项，不如不给。 -->
+        <div class="mt-1.5 flex items-center gap-1">
+          <span class="shrink-0 text-[10px] text-faint">循环</span>
+          <button
+            v-for="opt in LOOP_OPTIONS"
+            :key="opt.key"
+            class="flex-1 cursor-pointer rounded border py-[3px] text-center text-[10px] transition-colors"
+            :class="
+              store.videoLoop === opt.key
+                ? 'border-accent/50 bg-accent-soft text-accent'
+                : 'border-line-2 text-dim hover:border-white/25 hover:bg-white/10 hover:text-tx'
+            "
+            :title="opt.hint"
+            @click="onSetVideoLoop(opt.key)"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
+
+        <!-- 片段循环：留空 = 不设限（从头 / 到结尾）。
+             失焦或回车才提交，**不做逐键提交** —— 否则敲 "12" 会先按 "1" 生效一次，
+             桌面画面会跟着跳两下。 -->
+        <div class="mt-1.5 flex items-center gap-1">
+          <span class="shrink-0 text-[10px] text-faint">片段</span>
+          <input
+            v-model="clipStartInput"
+            type="number"
+            min="0"
+            step="0.1"
+            placeholder="0"
+            class="clip-input"
+            :class="clipInvalid ? 'clip-input-bad' : ''"
+            title="片段起点（秒），留空 = 从开头"
+            @blur="commitClip"
+            @keydown.enter="($event.target as HTMLInputElement).blur()"
+          />
+          <span class="shrink-0 text-[10px] text-faint">→</span>
+          <input
+            v-model="clipEndInput"
+            type="number"
+            min="0"
+            step="0.1"
+            placeholder="结尾"
+            class="clip-input"
+            :class="clipInvalid ? 'clip-input-bad' : ''"
+            :title="
+              clipInvalid
+                ? '结束时间必须大于开始时间'
+                : '片段终点（秒），留空 = 播到结尾'
+            "
+            @blur="commitClip"
+            @keydown.enter="($event.target as HTMLInputElement).blur()"
+          />
+          <span class="shrink-0 text-[10px] text-faint">秒</span>
+          <button
+            class="shrink-0 rounded border border-line-2 px-1.5 py-[3px] text-[10px] transition-colors"
+            :class="
+              clipActive
+                ? 'cursor-pointer text-dim hover:border-white/25 hover:bg-white/10 hover:text-tx'
+                : 'cursor-default text-faint opacity-50'
+            "
+            :title="clipActive ? '取消片段限制，恢复整段循环' : '当前已是整段播放'"
+            @click="onResetClip"
+          >
+            全部
+          </button>
+        </div>
+
         <!-- 自动暂停说明：暂停按钮此时是禁用态，光靠 title 提示不够 ——
              用户看到一个灰掉的"继续"会以为坏了，这行负责把原因讲清楚。 -->
         <div
@@ -1414,6 +1547,44 @@ onUnmounted(() => {
 .preview-container {
   position: relative;
   background-color: rgba(15, 20, 30, 0.5);
+}
+
+/* ---- 片段循环的秒数输入框 ---- */
+/* 去掉 number 的上下箭头：那两个箭头在 12px 高的输入框里根本点不中，
+   还白占 14px 宽度（面板本来就窄）。数值靠键盘输入，步进用不到。 */
+.clip-input {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 3px 4px;
+  border: 1px solid var(--line-2, rgba(255, 255, 255, 0.14));
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  text-align: center;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+.clip-input::placeholder {
+  color: rgba(255, 255, 255, 0.28);
+}
+.clip-input:focus {
+  border-color: rgba(127, 168, 255, 0.55);
+}
+/* 输入中非法（结束 ≤ 开始）：只标红，**不阻止输入** ——
+   用户从 "12" 改成 "8" 的中间态本来就短暂非法，拦下来只会让人打不完。 */
+.clip-input-bad {
+  border-color: rgba(255, 120, 120, 0.6);
+}
+.clip-input::-webkit-outer-spin-button,
+.clip-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.clip-input {
+  -moz-appearance: textfield;
+  appearance: textfield;
 }
 
 /* ---- 顶部工具条的"显示器"下拉（仅多屏时渲染）---- */

@@ -52,6 +52,14 @@ let crossTimer: number | undefined;
 /// 是否正在交叉（上层淡出中）。挡住 `crossStep` 的重复触发 ——
 /// 淡出期间 `front` **还没切换**，不挡的话每 25ms 就会再触发一次交叉。
 let crossing = false;
+/// 正在交叉的那两层（淡出中 / 即将升上来）。
+///
+/// 记下来是为了**能在中途收尾**：切换循环模式或换片段时 `stopLoop` 会取消
+/// 收尾定时器，若不先把这次交叉正常结束，退场层会停在 `opacity: 0`、
+/// `front` 却仍指向它 —— 循环驱动于是去轮询一个看不见的元素，
+/// 表现为"画面不动了，但状态是播放中"。
+let crossCur: HTMLVideoElement | null = null;
+let crossNext: HTMLVideoElement | null = null;
 /// 当前"可见层"（两层中在上面、正在播的那个）索引，0=A / 1=B
 let front = 0;
 /// 当前生效的视频地址（判断是否需要重置）
@@ -68,6 +76,41 @@ let currentSrc = "";
 let zCounter = 2;
 /// 是否已启用交叉循环（元数据就绪后确定）
 let crossEnabled = false;
+
+// ---------- 循环模式与片段区间 ----------
+//
+// 这两个设置把"结尾"从 `duration` 变成了"片段终点"，而本文件里所有时序判断
+// （交叉提前量、回绕、停住）都是围绕"结尾在哪"写的。因此**每一处读结尾的地方
+// 都必须走 `effectiveEnd()`**，不能直接拿 `duration` —— 漏一处就是
+// "片段循环时到了片段末尾却不停，一直播到整段结尾"。
+
+/// 循环模式：`"loop"` 循环 / `"once"` 播完停住
+let loopMode: "loop" | "once" = "loop";
+/// 片段起点（秒）
+let clipStart = 0;
+/// 片段终点（秒）；`0` = 到结尾
+let clipEnd = 0;
+/// `once` 模式下已经播完、冻结在末帧。
+///
+/// 必须有这一位：播完后元素的 `paused` 为 true，而任何一次状态事件
+/// （改静音、改速度、自动暂停恢复…）都会走到 `applyPlayback`，
+/// 那里"发现元素是暂停的就 play 起来" —— 没有这个闸门，
+/// 单次播放的视频会被下一次无关操作偷偷续播。
+let ended = false;
+
+/// 有效终点：片段终点与视频时长的较小者。
+/// 片段终点比时长还大时按时长算 —— 用户可能在别的片子上设过更长的终点。
+function effectiveEnd(el: HTMLVideoElement): number {
+  const d = el.duration;
+  if (!Number.isFinite(d) || d <= 0) return 0;
+  return clipEnd > 0 && clipEnd < d ? clipEnd : d;
+}
+
+/// 有效片段长度（秒）。非正值表示区间无效（起点已越过终点），调用方应跳过循环驱动。
+function effectiveLen(el: HTMLVideoElement): number {
+  const end = effectiveEnd(el);
+  return end > clipStart ? end - clipStart : 0;
+}
 
 /// 交叉点提前量与淡出时长的**上限**（秒）。
 ///
@@ -183,6 +226,8 @@ function resetElements() {
   front = 0;
   zCounter = 2;
   crossing = false;
+  crossCur = null;
+  crossNext = null;
   stallSince = 0;
 }
 
@@ -214,11 +259,22 @@ function crossStep() {
   // 上一次交叉还在淡出：`front` 尚未切换，不能重复触发
   if (crossing) return;
   const cur = elOf(front); // 可见层（在上，正在播）
-  const next = elOf(1 - front); // 预载层（在下，停在 0 帧）
+  const next = elOf(1 - front); // 预载层（在下，停在片段起点）
   if (!cur || !next) return;
 
-  const d = cur.duration;
-  if (!Number.isFinite(d) || d <= 0) return;
+  // **必须是 effectiveEnd 而不是 duration** —— 片段循环的"结尾"由用户指定
+  const d = effectiveEnd(cur);
+  if (d <= 0) return;
+
+  // 单次播放：到点就停住，不交叉、不回绕。
+  // 留 20ms 余量是因为轮询是 25ms 一跳，严格等于 d 时可能刚好错过。
+  if (loopMode === "once") {
+    if (cur.currentTime >= d - 0.02) {
+      cur.pause();
+      ended = true;
+    }
+    return;
+  }
 
   // 还有足够剩余时间就什么都不做
   if (cur.currentTime < d - crossLead) return;
@@ -255,9 +311,9 @@ function crossStep() {
   // 观感就是"**画面卡一下 / 跳一下**"。
   // 这个 seek 是纯粹的自伤：它没有换来任何正确性，只把一次异步操作搬到了
   // 最关键的那 400ms 上。只在真的偏了才纠正（正常情况不会走到）。
-  if (next.currentTime > 0.02) {
+  if (Math.abs(next.currentTime - clipStart) > 0.02) {
     try {
-      next.currentTime = 0;
+      next.currentTime = clipStart;
     } catch {
       /* 忽略：部分编码不支持精确 seek，仍可继续 */
     }
@@ -268,6 +324,8 @@ function crossStep() {
   //    而**没有被遮挡裁剪**，帧一直是提交着的）。
   //    合成结果 = (1-α)·上层 + α·下层 —— 线性、亮度恒定、不会往黑里沉。
   crossing = true;
+  crossCur = cur;
+  crossNext = next;
   // 淡出时长要按速率换算。
   //
   // `crossLead` / `crossFade` 都是**内容秒**（与 `currentTime` 同一单位），
@@ -300,6 +358,8 @@ function crossStep() {
 function finishCross(cur: HTMLVideoElement, next: HTMLVideoElement) {
   if (!crossing) return;
   crossing = false;
+  crossCur = null;
+  crossNext = null;
   // **这里是全流程中唯一一次 seek，而且是刻意的。**
   // 退场层要退回 0 帧，好在下一次交叉时充当预载层；它现在被夹在上层（`TOP_OPACITY`）
   // 下面（不可见），而且距离下次交叉还有一整圈（≈ 视频时长）——
@@ -308,7 +368,7 @@ function finishCross(cur: HTMLVideoElement, next: HTMLVideoElement) {
   // 交叉点上**不要**再补一次 seek（见 `crossStep` 的注释：那是自伤）。
   try {
     cur.pause();
-    cur.currentTime = 0;
+    cur.currentTime = clipStart;
   } catch {
     /* ignore */
   }
@@ -333,11 +393,18 @@ function wrapStep() {
   if (paused.value) return;
   const cur = elOf(front);
   if (!cur) return;
-  const d = cur.duration;
-  if (!Number.isFinite(d) || d <= 0) return;
-  if (cur.currentTime >= d - WRAP_LEAD_SECS) {
+  const d = effectiveEnd(cur);
+  if (d <= 0) return;
+  // 片段很短时提前量要按比例缩，否则 0.28s 会吃掉半段
+  const lead = Math.min(WRAP_LEAD_SECS, Math.max(0.05, effectiveLen(cur) * 0.5));
+  if (cur.currentTime >= d - lead) {
+    if (loopMode === "once") {
+      cur.pause();
+      ended = true;
+      return;
+    }
     try {
-      cur.currentTime = 0;
+      cur.currentTime = clipStart;
     } catch {
       /* ignore */
     }
@@ -370,7 +437,13 @@ function stopLoop() {
     window.clearTimeout(crossTimer);
     crossTimer = undefined;
   }
+  // 若正处在淡出中，先把它正常收尾再清状态。
+  // 否则退场层停在 `opacity: 0`、`front` 仍指向它，接下来的循环驱动
+  // 会去轮询一个看不见的元素 —— 表现为"画面不动，但状态是播放中"。
+  if (crossing && crossCur && crossNext) finishCross(crossCur, crossNext);
   crossing = false;
+  crossCur = null;
+  crossNext = null;
   stallSince = 0;
   const a = elOf(0);
   if (a && wrapHandler) {
@@ -386,6 +459,8 @@ function applyPath(path: string) {
   failed.value = false;
   errorMsg.value = "";
   crossEnabled = false;
+  // 换片子必须清掉"已播完"的闸门：否则 `once` 模式下换到新视频会一上来就冻着
+  ended = false;
   stopLoop();
   // currentSrc 必须**同步**记下，不能等 rAF 里再写：
   // 它现在是"是否需要换源"的判据（见 applyState），晚一帧写会让同一帧内
@@ -404,31 +479,68 @@ function applyPath(path: string) {
   });
 }
 
-/// 元数据就绪：此时才知道 duration，也才好决定能否交叉循环
-function onLoadedMetadata() {
+/// 按当前模式与片段长度重算交叉参数，并（重新）启动循环驱动。
+///
+/// **不 seek、不动 opacity/z-index** —— 调用方自己决定要不要把画面拉回起点。
+/// 拆开是因为"只改循环模式"不需要 seek：那会让画面白跳一下。
+function applyRange() {
   const a = elOf(0);
-  const b = elOf(1);
-  if (!a) return;
-  const d = a.duration;
-  // 交叉循环的几何约束是 `d - lead > fade`（上层在淡出走完之前不会播到结尾），
-  // 满足它的最短片子约 0.9s，取 1.0s 留一点余量。
+  const len = a ? effectiveLen(a) : 0;
+  // 单次播放不需要预载层（它不会回绕），顺带省一路解码。
   //
-  // **门槛不要随手调回 1.5**：低于门槛会退化成单元素回绕，而那是一次
-  // **瞬时的内容跳变** —— 实测整屏亮度在 10ms 内从 239 直跳到 16，
-  // 正是用户报的"画面跳一下/卡一下"。交叉循环只要能跑就跑。
-  crossEnabled = !!b && Number.isFinite(d) && d > 1.0;
+  // 1.0s 门槛是交叉循环的几何约束（`len - lead > fade`）推出来的，**不要随手调回 1.5**：
+  // 低于门槛会退化成单元素回绕，而那是一次**瞬时的内容跳变** —— 实测整屏亮度在
+  // 10ms 内从 239 直跳到 16，正是用户报的"画面跳一下/卡一下"。能跑交叉就跑交叉。
+  crossEnabled = loopMode === "loop" && !!elOf(1) && len > 1.0;
   if (crossEnabled) {
-    // 短片子按比例缩小，否则 0.5s 的提前量会占掉整段视频的一大半。
-    crossLead = Math.min(CROSS_LEAD_MAX, d * 0.35);
+    // 短片段按比例缩小，否则 0.5s 的提前量会占掉整段的一大半
+    crossLead = Math.min(CROSS_LEAD_MAX, len * 0.35);
     crossFade = Math.min(CROSS_FADE_MAX, crossLead * 0.8);
   } else {
     crossLead = CROSS_LEAD_MAX;
     crossFade = CROSS_FADE_MAX;
   }
+  startLoop();
+}
+
+/// 把两层都拉回片段起点，并复位叠放关系（换片段/换模式时用）。
+///
+/// **两层都要 seek**：交叉循环里任何一层都可能在下一轮变成可见层，
+/// 只拉一层的话，另一层会在交叉点带着旧位置升上来 —— 表现为"跳一下"。
+function resetToClipStart() {
+  for (const el of [elOf(0), elOf(1)]) {
+    if (!el) continue;
+    try {
+      el.currentTime = clipStart;
+    } catch {
+      /* ignore */
+    }
+  }
+  resetElements();
+}
+
+/// 元数据就绪：此时才知道 duration，也才好决定能否交叉循环
+function onLoadedMetadata() {
+  const a = elOf(0);
+  if (!a) return;
+  // 新片子：清掉"已播完"的闸门，否则单次模式下换视频会一上来就冻着
+  ended = false;
   resetElements();
   // 重载会重置 `playbackRate`，这里补一次（`applyRate` 幂等、无副作用）
   applyRate();
-  startLoop();
+  // 片段起点不是 0 时才需要 seek —— 绝大多数情况（整段循环）这里什么都不做，
+  // 也就不会有那一次可见的跳变
+  if (clipStart > 0) {
+    for (const el of [a, elOf(1)]) {
+      if (!el) continue;
+      try {
+        el.currentTime = clipStart;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  applyRange();
   if (!paused.value) tryPlay(a);
 }
 
@@ -448,6 +560,12 @@ interface VideoState {
   effective_paused: boolean;
   /** 播放速率（1 = 原速） */
   speed: number;
+  /** 循环模式：`"loop"` / `"once"` */
+  loop_mode: string;
+  /** 片段循环起点（秒） */
+  clip_start: number;
+  /** 片段循环终点（秒）；`0` = 到结尾 */
+  clip_end: number;
 }
 
 /// 把静音 / 暂停应用到两个视频元素。
@@ -461,6 +579,9 @@ function applyPlayback() {
     elOf(1)?.pause();
     return;
   }
+  // `once` 模式已经播完：**不要**被后续的状态事件重新拉起来。
+  // 用户想再看一遍会点"暂停 → 继续"，那条路径会把 `ended` 清掉。
+  if (ended) return;
   const cur = elOf(front);
   if (cur && cur.paused) tryPlay(cur);
 }
@@ -475,11 +596,29 @@ function applyState(st: VideoState) {
   // **用 effective_paused 而不是 paused**：后者只表示用户手动暂停，
   // 环境自动暂停（全屏游戏 / 电池 / 锁屏）必须同样冻结画面。
   // 播放页因此不需要知道暂停是谁触发的 —— 后端已经合成好这一位。
+  const wasPaused = paused.value;
   paused.value = !!st.effective_paused;
+  // 用户手动"继续"是 `once` 模式播完后唯一的复播入口：
+  // 后端并不知道播放页已经停在末帧（那边只看到 paused=false），
+  // 所以这条"暂停 → 继续"的边沿必须在这里识别出来。
+  if (wasPaused && !paused.value) ended = false;
   // 速率**无条件写**：改速率不 seek、不重建、不打断播放，代价只有两次属性赋值。
   // 加"值没变就跳过"的短路反而会在"元素刚被重建、ref 却还是旧值"时漏掉应用。
   speed.value = Number.isFinite(st.speed) && st.speed > 0 ? st.speed : 1;
   applyRate();
+
+  // ---- 循环模式 / 片段区间 ----
+  // 归一化后再比较：后端用 `0` 表示"到结尾"，`Number(undefined)` 是 NaN，
+  // 直接比会让"字段缺失"被误判成"区间变了"，于是每次状态事件都 seek 一次。
+  const nextMode: "loop" | "once" = st.loop_mode === "once" ? "once" : "loop";
+  const nextStart = Math.max(0, Number(st.clip_start) || 0);
+  const nextEnd = Math.max(0, Number(st.clip_end) || 0);
+  const modeChanged = nextMode !== loopMode;
+  const clipChanged = nextStart !== clipStart || nextEnd !== clipEnd;
+  loopMode = nextMode;
+  clipStart = nextStart;
+  clipEnd = nextEnd;
+
   // 已停止：`stop_video_wallpaper` 是直接关窗、不发事件，所以正常收不到这一支；
   // 但万一"停止"与"建窗"并发、窗口活了下来，冻结画面总好过继续播一个
   // 已经被取消的壁纸。
@@ -488,9 +627,19 @@ function applyState(st: VideoState) {
     elOf(1)?.pause();
     return;
   }
+  // **换源优先于应用区间**：换视频时后端会把片段区间复位成 0，这里也会
+  // 判定为 clipChanged；若先执行 seek 就是对着**旧片子** seek 一次再整体重载，
+  // 白闪一下。交给 `applyPath` → `onLoadedMetadata` 用新值一次性就位。
   if (st.path && st.path !== currentSrc) {
     applyPath(st.path); // 内部按 paused 决定是否自动播放
     return;
+  }
+  if (modeChanged || clipChanged) {
+    ended = false;
+    // 只有区间变了才把画面拉回起点：只改循环模式时 seek 一下纯属白跳
+    if (clipChanged) resetToClipStart();
+    applyRange();
+    if (!paused.value) tryPlay(elOf(front));
   }
   applyPlayback();
 }
