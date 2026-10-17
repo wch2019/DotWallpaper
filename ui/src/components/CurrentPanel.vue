@@ -7,7 +7,7 @@
 //   - 预览样式下拉可即时预览；设为壁纸时若与系统样式不同会同步写注册表
 import { computed, h, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { NButton, NColorPicker, NIcon, NSelect, NSlider, NSwitch } from "naive-ui";
-import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, History, LayoutGrid, Maximize, Monitor, Pause, Play, Sparkles, Square, Star, Volume2, VolumeX, X } from "lucide-vue-next";
+import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, History, LayoutGrid, Maximize, Monitor, Pause, Play, SlidersHorizontal, Sparkles, Square, Star, Volume2, VolumeX, X } from "lucide-vue-next";
 import {
   baseName,
   displaySrc,
@@ -595,6 +595,30 @@ const clipInvalid = computed(() => {
 const clipActive = computed(
   () => store.videoClipStart > 0 || store.videoClipEnd > 0
 );
+
+// 播放设置区默认收起。
+//
+// 视频区块一度有 7 行常驻内容（状态 / 三个按钮 / 速度 / 循环 / 片段 /
+// 自动暂停说明 / 暂停记录），右栏本来就只有 300 多像素宽，视觉上糊成一片。
+// 现在常驻只留"状态 + 控制 + 一条摘要"，参数收进这里。
+//
+// 收起不影响可发现性：摘要条上直接写着当前值（`1.5× · 单次 · 整段`），
+// 用户不展开也知道现在是什么状态。
+const settingsExpanded = ref(false);
+
+/// 摘要条文案。**必须反映真实生效的值**，否则用户会以为设置没生效。
+const settingsSummary = computed(() => {
+  const parts: string[] = [`${store.videoSpeed}×`];
+  parts.push(store.videoLoop === "once" ? "单次" : "循环");
+  if (clipActive.value) {
+    const s = store.videoClipStart;
+    const e = store.videoClipEnd;
+    parts.push(e > 0 ? `片段 ${s}–${e}s` : `片段 ${s}s 起`);
+  } else {
+    parts.push("整段");
+  }
+  return parts.join(" · ");
+});
 
 /// 提交片段区间。空 / 非数字 / 0 一律当作"不设限"（开始=0，结束=到结尾）。
 async function commitClip() {
@@ -1280,102 +1304,129 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <!-- 播放速度：离散档位而不是滑块。
-             速率是观感选择（0.75 与 0.8 肉眼无差），连续值只会让人反复微调，
-             还得额外处理"取整到两位小数"的显示问题。
-             档位与 `VIDEO_SPEEDS` 一一对应 —— 后端允许到 3.0，但交叉循环
-             在高速下留给淡出的余量会被压得很薄，这里只提供稳定区间。 -->
-        <div class="mt-1.5 flex items-center gap-1">
-          <span class="shrink-0 text-[10px] text-faint">速度</span>
-          <button
-            v-for="s in VIDEO_SPEEDS"
-            :key="s"
-            class="flex-1 cursor-pointer rounded border py-[3px] text-center font-mono text-[10px] transition-colors"
-            :class="
-              store.videoSpeed === s
-                ? 'border-accent/50 bg-accent-soft text-accent'
-                : 'border-line-2 text-dim hover:border-white/25 hover:bg-white/10 hover:text-tx'
-            "
-            :title="`以 ${s} 倍速播放`"
-            @click="onSetVideoSpeed(s)"
-          >
-            {{ s }}×
-          </button>
-        </div>
-
-        <!-- 循环模式：只提供"循环 / 单次"。
-             **刻意没有"往复"**：HTML5 的 playbackRate 不接受负值，
-             Chromium 没有反向解码能力，倒放只能逐帧 seek —— 4K 素材上必然掉帧，
-             与"无感循环"的目标正好相反。与其给个看着有、用起来卡的选项，不如不给。 -->
-        <div class="mt-1.5 flex items-center gap-1">
-          <span class="shrink-0 text-[10px] text-faint">循环</span>
-          <button
-            v-for="opt in LOOP_OPTIONS"
-            :key="opt.key"
-            class="flex-1 cursor-pointer rounded border py-[3px] text-center text-[10px] transition-colors"
-            :class="
-              store.videoLoop === opt.key
-                ? 'border-accent/50 bg-accent-soft text-accent'
-                : 'border-line-2 text-dim hover:border-white/25 hover:bg-white/10 hover:text-tx'
-            "
-            :title="opt.hint"
-            @click="onSetVideoLoop(opt.key)"
-          >
-            {{ opt.label }}
-          </button>
-        </div>
-
-        <!-- 片段循环：留空 = 不设限（从头 / 到结尾）。
-             失焦或回车才提交，**不做逐键提交** —— 否则敲 "12" 会先按 "1" 生效一次，
-             桌面画面会跟着跳两下。 -->
-        <div class="mt-1.5 flex items-center gap-1">
-          <span class="shrink-0 text-[10px] text-faint">片段</span>
-          <input
-            v-model="clipStartInput"
-            type="number"
-            min="0"
-            step="0.1"
-            placeholder="0"
-            class="clip-input"
-            :class="clipInvalid ? 'clip-input-bad' : ''"
-            title="片段起点（秒），留空 = 从开头"
-            @blur="commitClip"
-            @keydown.enter="($event.target as HTMLInputElement).blur()"
+        <!-- 播放设置摘要条：常驻但只占一行。
+             左侧写死"播放设置"，右侧直接显示**当前生效值**，
+             所以收起状态下也能一眼看清"几倍速、循环还是单次、有没有截片段"。
+             摘要用等宽字体：数字与 `×` 对齐更稳，也不会随文案长度抖动。 -->
+        <button
+          class="mt-1.5 flex w-full cursor-pointer items-center gap-1.5 rounded px-0.5 py-1 text-[10.5px] text-faint transition-colors hover:text-tx"
+          :title="
+            settingsExpanded
+              ? '收起播放设置'
+              : '展开播放设置（速度 / 循环 / 片段）'
+          "
+          @click="settingsExpanded = !settingsExpanded"
+        >
+          <NIcon :component="SlidersHorizontal" :size="12" class="shrink-0" />
+          <span class="shrink-0">播放设置</span>
+          <span class="min-w-0 flex-1 truncate text-right font-mono text-[10px] text-dim">
+            {{ settingsSummary }}
+          </span>
+          <NIcon
+            :component="ChevronDown"
+            :size="12"
+            class="shrink-0"
+            :class="settingsExpanded ? 'rotate-180' : ''"
+            style="transition: transform 0.18s ease"
           />
-          <span class="shrink-0 text-[10px] text-faint">→</span>
-          <input
-            v-model="clipEndInput"
-            type="number"
-            min="0"
-            step="0.1"
-            placeholder="结尾"
-            class="clip-input"
-            :class="clipInvalid ? 'clip-input-bad' : ''"
-            :title="
-              clipInvalid
-                ? '结束时间必须大于开始时间'
-                : '片段终点（秒），留空 = 播到结尾'
-            "
-            @blur="commitClip"
-            @keydown.enter="($event.target as HTMLInputElement).blur()"
-          />
-          <span class="shrink-0 text-[10px] text-faint">秒</span>
-          <button
-            class="shrink-0 rounded border border-line-2 px-1.5 py-[3px] text-[10px] transition-colors"
-            :class="
-              clipActive
-                ? 'cursor-pointer text-dim hover:border-white/25 hover:bg-white/10 hover:text-tx'
-                : 'cursor-default text-faint opacity-50'
-            "
-            :title="clipActive ? '取消片段限制，恢复整段循环' : '当前已是整段播放'"
-            @click="onResetClip"
-          >
-            全部
-          </button>
+        </button>
+
+        <!-- 播放参数：默认收起。
+             三行统一成"左侧标签 + 右侧一个整体控件"，而不是原来三排各自独立的
+             小方块 —— 后者每个都带边框，三行叠起来在窄面板里像三排开关墙。 -->
+        <div v-if="settingsExpanded" class="mt-1 flex flex-col gap-1.5">
+          <!-- 速度：离散档位而不是滑块。速率是观感选择（0.75 与 0.8 肉眼无差），
+               连续值只会让人反复微调。档位与 `VIDEO_SPEEDS` 一一对应 ——
+               后端允许到 3.0，但交叉循环在高速下留给淡出的余量会被压得很薄。 -->
+          <div class="param-row">
+            <span class="param-label">速度</span>
+            <div class="seg">
+              <button
+                v-for="s in VIDEO_SPEEDS"
+                :key="s"
+                class="seg-item font-mono"
+                :class="store.videoSpeed === s ? 'seg-item-on' : ''"
+                :title="`以 ${s} 倍速播放`"
+                @click="onSetVideoSpeed(s)"
+              >
+                {{ s }}×
+              </button>
+            </div>
+          </div>
+
+          <!-- 循环：只提供"循环 / 单次"。
+               **刻意没有"往复"**：HTML5 的 playbackRate 不接受负值，
+               Chromium 没有反向解码能力，倒放只能逐帧 seek —— 4K 素材上必然掉帧，
+               与"无感循环"的目标正好相反。与其给个看着有、用起来卡的选项，不如不给。 -->
+          <div class="param-row">
+            <span class="param-label">循环</span>
+            <div class="seg">
+              <button
+                v-for="opt in LOOP_OPTIONS"
+                :key="opt.key"
+                class="seg-item"
+                :class="store.videoLoop === opt.key ? 'seg-item-on' : ''"
+                :title="opt.hint"
+                @click="onSetVideoLoop(opt.key)"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+          </div>
+
+          <!-- 片段循环：留空 = 不设限（从头 / 到结尾）。
+               失焦或回车才提交，**不做逐键提交** —— 否则敲 "12" 会先按 "1" 生效一次，
+               桌面画面会跟着跳两下。 -->
+          <div class="param-row">
+            <span class="param-label">片段</span>
+            <input
+              v-model="clipStartInput"
+              type="number"
+              min="0"
+              step="0.1"
+              placeholder="0"
+              class="clip-input"
+              :class="clipInvalid ? 'clip-input-bad' : ''"
+              title="片段起点（秒），留空 = 从开头"
+              @blur="commitClip"
+              @keydown.enter="($event.target as HTMLInputElement).blur()"
+            />
+            <span class="shrink-0 text-[10px] text-faint">→</span>
+            <input
+              v-model="clipEndInput"
+              type="number"
+              min="0"
+              step="0.1"
+              placeholder="结尾"
+              class="clip-input"
+              :class="clipInvalid ? 'clip-input-bad' : ''"
+              :title="
+                clipInvalid
+                  ? '结束时间必须大于开始时间'
+                  : '片段终点（秒），留空 = 播到结尾'
+              "
+              @blur="commitClip"
+              @keydown.enter="($event.target as HTMLInputElement).blur()"
+            />
+            <span class="shrink-0 text-[10px] text-faint">秒</span>
+            <button
+              class="shrink-0 rounded border border-line-2 px-1.5 py-[3px] text-[10px] transition-colors"
+              :class="
+                clipActive
+                  ? 'cursor-pointer text-dim hover:border-white/25 hover:bg-white/10 hover:text-tx'
+                  : 'cursor-default text-faint opacity-50'
+              "
+              :title="clipActive ? '取消片段限制，恢复整段循环' : '当前已是整段播放'"
+              @click="onResetClip"
+            >
+              全部
+            </button>
+          </div>
         </div>
 
         <!-- 自动暂停说明：暂停按钮此时是禁用态，光靠 title 提示不够 ——
-             用户看到一个灰掉的"继续"会以为坏了，这行负责把原因讲清楚。 -->
+             用户看到一个灰掉的"继续"会以为坏了，这行负责把原因讲清楚。
+             **留在常驻区**：它解释的是"为什么现在不动"，属于当下状态而非设置。 -->
         <div
           v-if="store.videoWallpaper.autoPause"
           class="mt-1 text-[10px] leading-snug text-amber-300/90"
@@ -1383,11 +1434,14 @@ onUnmounted(() => {
           已自动暂停：{{ autoPauseText }} · 条件解除后自动恢复
         </div>
 
-        <!-- 最近自动暂停记录：只在真发生过时才出现，默认收起。
-             这是锁屏/电池这两类暂停**唯一可自查的痕迹** ——
-             它们发生时用户看不见桌面，画面暂停前后完全一样；
-             release 版又没有控制台，只能靠这份列表回答"刚才到底停过没有"。 -->
-        <div v-if="autoPauseHistory.length" class="mt-2 border-t border-line/60 pt-1.5">
+        <!-- 最近自动暂停记录：诊断信息，收进设置区尾部 —— 它不是日常操作，
+             常驻只会继续加高这一栏。只在真发生过时才出现，默认收起。
+             这是锁屏/电池这两类暂停**唯一可自查的痕迹**：它们发生时用户
+             看不见桌面，画面暂停前后完全一样；release 版又没有控制台。 -->
+        <div
+          v-if="settingsExpanded && autoPauseHistory.length"
+          class="mt-2 border-t border-line/60 pt-1.5"
+        >
           <button
             class="flex w-full cursor-pointer items-center gap-1.5 rounded px-0.5 py-0.5 text-[10.5px] text-faint transition-colors hover:text-tx"
             :title="
@@ -1547,6 +1601,61 @@ onUnmounted(() => {
 .preview-container {
   position: relative;
   background-color: rgba(15, 20, 30, 0.5);
+}
+
+/* ---- 播放参数行（速度 / 循环 / 片段）---- */
+/* 统一的"左标签 + 右控件"骨架。三行共用同一套间距与标签宽度，
+   纵向才对得齐 —— 之前三行各自独立排版，标签宽度不同，看着是歪的。 */
+.param-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.param-label {
+  flex: 0 0 auto;
+  width: 24px;
+  font-size: 10px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+/* 分段控件：**一个整体**，而不是一排各自带边框的按钮。
+   视觉上从"6 个方块"变成"1 个控件"，这是这一栏显得杂乱的主要来源。 */
+.seg {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--line-2, rgba(255, 255, 255, 0.14));
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.seg-item {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 2px 0;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 1.35;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+.seg-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+}
+/* 选中项：**实心**强调色块，而不是"描边 + 淡背景"。
+   分段控件里靠边框区分选中，会和外层容器边框打架，看起来像两个框套着。 */
+.seg-item-on,
+.seg-item-on:hover {
+  background: rgba(127, 168, 255, 0.22);
+  color: #a9c4ff;
 }
 
 /* ---- 片段循环的秒数输入框 ---- */
