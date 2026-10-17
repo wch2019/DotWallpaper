@@ -427,7 +427,106 @@ pub fn get_primary_screen_meta(app: &tauri::AppHandle) -> Result<ScreenMeta, Str
     })
 }
 
-/// 从本地磁盘永久删除壁纸文件（仅限支持的图片/视频扩展名）
+/// 把文件移入**回收站**（可撤销），语义等同于资源管理器里按 Delete。
+///
+/// 壁纸目录通常是用户自己长期积攒的图，误删后不该无法挽回，因此不走
+/// `std::fs::remove_file`（那是永久抹除）。这里调用 shell 的
+/// `SHFileOperationW` + `FOF_ALLOWUNDO`，文件进入回收站，用户可自行还原。
+///
+/// 几个必须注意的点：
+/// - `pFrom` 要求**绝对路径**，且必须以**双 NUL** 结尾（单 NUL 结尾会被当成
+///   多文件列表的第一项而继续读下去）。
+/// - `SHFileOperationW` **不接受 `\\?\` 前缀**的 verbatim 路径，传进去会失败，
+///   所以这里刻意不用 `std::fs::canonicalize`（它返回的正是 verbatim 形式）。
+/// - 该 API 不弹 UI（`FOF_SILENT | FOF_NOERRORUI`），错误码是 shell 的旧式
+///   非 Win32 错误码。**返回码不完全可靠**（见下方结果判定），仅用于日志。
+#[cfg(windows)]
+fn move_to_recycle_bin(p: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::{BOOL, HWND};
+    use windows::Win32::UI::Shell::{
+        SHFileOperationW, SHFILEOPSTRUCTW, FO_DELETE, FOF_ALLOWUNDO, FOF_NOERRORUI,
+        FOF_NOCONFIRMATION, FOF_SILENT,
+    };
+
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("解析当前目录失败：{e}"))?
+            .join(p)
+    };
+    // 防御：调用方若传入 verbatim 路径（\\?\C:\... / \\?\UNC\server\share），
+    // 先还原成 shell 能识别的普通形式
+    let abs = {
+        let s = abs.to_string_lossy();
+        match s.strip_prefix(r"\\?\") {
+            Some(rest) => match rest.strip_prefix(r"UNC\") {
+                Some(unc) => PathBuf::from(format!(r"\\{unc}")),
+                None => PathBuf::from(rest),
+            },
+            None => abs,
+        }
+    };
+
+    // 先确认文件确实存在：下面的结果判定以"源文件消失"为成功依据，
+    // 若调用前文件就不在，就无法区分"被我们移走"和"本来就没有"。
+    if !abs.exists() {
+        return Err("文件不存在或已被移动".into());
+    }
+
+    let mut from: Vec<u16> = abs.as_os_str().encode_wide().collect();
+    from.push(0);
+    from.push(0);
+
+    let mut op = SHFILEOPSTRUCTW {
+        hwnd: HWND::default(),
+        wFunc: FO_DELETE,
+        pFrom: PCWSTR(from.as_ptr()),
+        pTo: PCWSTR::null(),
+        // 该字段在 windows-rs 中声明为 u16，而 FILEOPERATION_FLAGS 是 u32 新类型
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI).0 as u16,
+        fAnyOperationsAborted: BOOL(0),
+        hNameMappings: std::ptr::null_mut(),
+        lpszProgressTitle: PCWSTR::null(),
+    };
+
+    // SAFETY: `from` 在本次调用期间保持存活且以双 NUL 结尾；其余字段均为
+    // 空指针 / 默认值，符合 SHFILEOPSTRUCTW 对单文件删除的要求。
+    let rc = unsafe { SHFileOperationW(&mut op) };
+    let aborted = op.fAnyOperationsAborted.as_bool();
+
+    // **结果以文件系统状态为准，而不是返回码。**
+    // 实测部分卷（本机 D:）上，文件已被正确移入回收站，`SHFileOperationW`
+    // 却仍返回 0x2（ERROR_FILE_NOT_FOUND）。若只看返回码，前端会误报"删除失败"，
+    // 于是把已经不在磁盘上的条目继续留在列表里、缩略图缓存也不清理。
+    // 因此只要源文件确实消失了就算成功，异常返回码仅记录日志备查。
+    if !abs.exists() {
+        if rc != 0 {
+            eprintln!(
+                "[warn] SHFileOperationW 返回 0x{rc:X}，但文件已移入回收站：{}",
+                abs.display()
+            );
+        }
+        return Ok(());
+    }
+
+    if rc != 0 {
+        return Err(format!("移入回收站失败（shell 错误码 0x{rc:X}）"));
+    }
+    if aborted {
+        return Err("移入回收站被取消".into());
+    }
+    Err("移入回收站失败：文件仍存在于原位置".into())
+}
+
+/// 非 Windows 平台的兜底（本项目只发布 Windows 版，此分支仅保证可编译）
+#[cfg(not(windows))]
+fn move_to_recycle_bin(p: &Path) -> Result<(), String> {
+    std::fs::remove_file(p).map_err(|e| format!("删除失败：{e}"))
+}
+
+/// 删除壁纸文件：**移入回收站**而非永久抹除（仅限支持的图片/视频扩展名）
 ///
 /// 安全约束：C:\Windows 等系统路径下的壁纸一律只读，禁止删除。
 pub fn delete_wallpaper_file(path: &str) -> Result<(), String> {
@@ -453,8 +552,7 @@ pub fn delete_wallpaper_file(path: &str) -> Result<(), String> {
         return Err("不支持的壁纸文件类型".into());
     }
 
-    std::fs::remove_file(&p).map_err(|e| format!("删除失败：{e}"))?;
-    Ok(())
+    move_to_recycle_bin(&p)
 }
 
 // ============================================================================

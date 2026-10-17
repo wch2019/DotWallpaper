@@ -120,14 +120,14 @@ fn get_desktop_screen(app: tauri::AppHandle) -> Result<wallpaper::ScreenMeta, St
     wallpaper::get_primary_screen_meta(&app)
 }
 
-/// 从本地磁盘永久删除壁纸文件（仅限支持的图片扩展名）
+/// 将壁纸文件移入回收站（仅限支持的图片 / 视频扩展名，可还原）
 ///
-/// 删除原图成功后同步清理其缩略图缓存；系统壁纸只读约束不变（C:\Windows
+/// 移出原图成功后同步清理其缩略图缓存；系统壁纸只读约束不变（C:\Windows
 /// 路径会先被后端拦截报错，不会误删对应缩略图）。
 #[tauri::command]
 async fn delete_wallpaper(path: String, app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        // 先删除源文件：系统路径 / 不存在 / 不支持类型会在这一步被拒绝
+        // 先把源文件移入回收站：系统路径 / 不存在 / 不支持类型会在这一步被拒绝
         wallpaper::delete_wallpaper_file(&path)?;
         // 源文件删除成功后再清理缩略图缓存（尽力而为）
         if let Ok(cache) = thumbs::cache_dir(&app) {

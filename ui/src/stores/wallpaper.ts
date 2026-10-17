@@ -1350,7 +1350,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     }
   }
 
-  // 右键删除：本地磁盘永久删除壁纸文件
+  // 右键删除：把壁纸文件移入回收站（可还原，不做永久抹除）
   async function removeWallpaper(item: WallpaperItem): Promise<void> {
     if (!item.path) return;
     // 只读保护：系统壁纸来源不允许删除（同时后端 delete_wallpaper 亦拦截系统路径）
@@ -1359,20 +1359,20 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
     const confirmed = await confirmDanger({
       title: "删除壁纸",
-      content: `确定要删除壁纸「${name}」吗？\n该文件会从本地磁盘永久删除，无法恢复。`,
-      positiveText: "删除",
+      content: `确定要删除壁纸「${name}」吗？\n该文件会被移入回收站，之后可从回收站还原。`,
+      positiveText: "移到回收站",
     });
     if (!confirmed) return;
 
     try {
       await invoke("delete_wallpaper", { path: item.path });
-      // 文件已物理删除：同步清理收藏书签，避免收藏夹出现失效路径
+      // 文件已移出目录：同步清理收藏书签，避免收藏夹出现失效路径
       if (isFavorite(item.path)) removeFavorite(item.path);
       // 删除的正是正在播放的动态壁纸：同步停掉置底窗口，避免窗口指向已删文件
       if (isCurrentVideo(item)) {
         await stopVideoWallpaper();
       }
-      toast("已删除壁纸：" + name, "success");
+      toast("已移入回收站：" + name, "success");
       await loadWallpapers();
       // 删除的正是当前桌面壁纸：同步刷新桌面真值
       if (currentWallpaper.value?.path === item.path) {
