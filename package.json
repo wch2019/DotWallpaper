@@ -9,6 +9,7 @@
     "pack:msix": "npm run build-msix"
   },
   "devDependencies": {
+    "@microsoft/winappcli": "^0.7.1",
     "@tauri-apps/cli": "^2"
   },
   "dependencies": {

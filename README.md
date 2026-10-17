@@ -101,7 +101,7 @@ DotWallpaper/
 - **Node.js**：18+（前端构建；CI 使用 20）
 - **Rust**：稳定工具链（需 MSVC 构建工具链）
 - **PowerShell 7+（pwsh）**：仅 MSIX 打包需要（`scripts/build-msix.ps1` 依赖）
-- **winapp CLI**：仅 MSIX 打包需要（Windows 应用打包工具，含证书生成）
+- **winapp CLI**：仅 MSIX 打包需要（Windows 应用打包工具，含证书生成）。已作为根工程 devDependency（`@microsoft/winappcli`）随 `npm install` 自动安装，无需另行全局安装
 
 ## 快速开始
 
@@ -147,7 +147,7 @@ npm run pack:msix
 3. 组装 `DotWallpaper.exe + Package.appxmanifest + Assets` 包布局
 4. 调用 winapp 打包为 MSIX；`-Sign` 时自动生成 / 校验本地自签证书
 
-产物位于 `src-tauri/target/msix/xiaohai.DotWallpaper_<版本>_x64.msix`。首次安装需信任自签证书（管理员执行一次 `winapp cert install src-tauri/devcert.pfx`）；提交商店后由商店自行重签。
+产物位于 `src-tauri/target/msix/xiaohai.DotWallpaper_<版本>_x64.msix`。首次安装需信任自签证书（管理员执行一次 `npx winapp cert install src-tauri/devcert.pfx`）；提交商店后由商店自行重签。
 
 ## 核心命令
 

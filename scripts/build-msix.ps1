@@ -27,6 +27,18 @@ if (-not $PSScriptRoot) { throw "请以脚本方式运行本文件" }
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
+# 解析 winapp CLI：优先 PATH（npm run 会注入 node_modules/.bin），
+# 其次回退到根工程 devDependency（@microsoft/winappcli）自带的本地 shim，
+# 这样直接 pwsh -File scripts/build-msix.ps1 也能工作。
+$winapp = (Get-Command winapp -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if (-not $winapp) {
+    $localShim = Join-Path $root "node_modules/.bin/winapp.cmd"
+    if (Test-Path $localShim) { $winapp = $localShim }
+}
+if (-not $winapp) {
+    throw "未找到 winapp CLI。请在仓库根目录执行 npm install（安装 @microsoft/winappcli 开发依赖）后重试"
+}
+
 $manifest   = "src-tauri/Package.appxmanifest"
 $packageDir = "src-tauri/target/msix"
 $layout     = "$packageDir/layout"
@@ -77,15 +89,15 @@ if ($Sign) {
     }
     if ($needGen) {
         Write-Host "签发自签开发证书：$CertPath" -ForegroundColor Yellow
-        winapp cert generate --manifest $manifest --output $CertPath --password $CertPassword --if-exists Overwrite
+        & $winapp cert generate --manifest $manifest --output $CertPath --password $CertPassword --if-exists Overwrite
     }
     $pkgArgs += @("--cert", $CertPath, "--cert-password", $CertPassword)
 }
 
-winapp @pkgArgs
+& $winapp @pkgArgs
 if ($LASTEXITCODE -ne 0) { throw "MSIX 打包失败，退出码 $LASTEXITCODE" }
 
 Write-Host "构建完成：$outFile" -ForegroundColor Green
 if ($Sign) {
-    Write-Host "首次安装前需信任证书（管理员执行一次）：winapp cert install $CertPath" -ForegroundColor Yellow
+    Write-Host "首次安装前需信任证书（管理员执行一次）：npx winapp cert install $CertPath" -ForegroundColor Yellow
 }
