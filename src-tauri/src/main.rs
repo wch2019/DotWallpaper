@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bing;
+mod desktop_diag;
 mod thumbs;
 mod wallpaper;
 mod video_wallpaper;
@@ -814,8 +815,30 @@ fn main() {
             video_wallpaper::stop_video_wallpaper,
             video_wallpaper::get_video_wallpaper_state,
             video_wallpaper::get_auto_pause_history,
-            video_wallpaper::list_monitors
+            video_wallpaper::list_monitors,
+            diag_video_wallpaper,
+            save_text_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// 动态壁纸「一键诊断」：把桌面层结构、窗口挂载状态、鼠标命中测试一次性收齐，
+/// 返回「人话结论 + 完整明细」。**只读**，不会改变任何窗口状态。
+///
+/// 用 `spawn_blocking`：内部全是同步的 Win32 枚举调用，放主线程会卡住 UI。
+#[tauri::command]
+async fn diag_video_wallpaper(app: tauri::AppHandle) -> Result<desktop_diag::DiagReport, String> {
+    tauri::async_runtime::spawn_blocking(move || desktop_diag::collect(&app))
+        .await
+        .map_err(|e| format!("诊断失败：{e}"))
+}
+
+/// 把一段文本写到用户选定的路径（诊断结果「保存为文件」用）。
+///
+/// 刻意不引入 fs 插件：只是写一份文本，自定义命令最省事 ——
+/// 不用加依赖，也不用再往 capability 里补权限。
+#[tauri::command]
+fn save_text_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|e| format!("写入失败：{e}"))
 }

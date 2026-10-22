@@ -7,7 +7,7 @@
 //   - 预览样式下拉可即时预览；设为壁纸时若与系统样式不同会同步写注册表
 import { computed, h, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { NButton, NColorPicker, NIcon, NSelect, NSlider, NSwitch } from "naive-ui";
-import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, History, LayoutGrid, Maximize, Monitor, Pause, Play, SlidersHorizontal, Sparkles, Square, Star, Volume2, VolumeX, X } from "lucide-vue-next";
+import { AlertTriangle, Activity, Check, ChevronDown, ChevronLeft, ChevronRight, History, LayoutGrid, Maximize, Monitor, Pause, Play, SlidersHorizontal, Sparkles, Square, Star, Volume2, VolumeX, X } from "lucide-vue-next";
 import {
   baseName,
   displaySrc,
@@ -20,10 +20,34 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "../lib/naive-host";
 import { currentMonitor } from "@tauri-apps/api/window";
+import DiagDialog from "./DiagDialog.vue";
 
 const store = useWallpaperStore();
 
 const imgError = ref(false);
+
+/// 动态壁纸诊断弹窗（入口见模板里"动态壁纸"区块）
+const diagVisible = ref(false);
+
+/// **验收期开关**：true = 应用启动后直接把诊断弹窗打开（只为方便测试）。
+/// 平时必须保持 false —— 正常路径是下面的「挂载失败自动弹出」+ 行内小图标入口。
+/// 留这个常量是为了以后再要"一启动就看到诊断"时不用改逻辑。
+const DIAG_AUTO_OPEN_FOR_TEST = false;
+
+// 启动后自动打开诊断（仅验收期）
+onMounted(() => {
+  if (DIAG_AUTO_OPEN_FOR_TEST) diagVisible.value = true;
+});
+
+// **最终行为**：挂载失败时自动弹出诊断。
+// 只在 false → true 那一刻弹一次 —— 巡检每 4 秒重试会反复把 attachFailed 置位，
+// 但那不会再次触发 watch，用户关掉后不会被打扰第二次。
+watch(
+  () => store.videoWallpaper.attachFailed,
+  (failed) => {
+    if (failed) diagVisible.value = true;
+  }
+);
 
 // ---------- 壁纸样式选项（与 Windows 壁纸模式一一对应） ----------
 const STYLE_OPTIONS = [
@@ -1196,21 +1220,30 @@ onUnmounted(() => {
            选片入口在首页标题栏。 -->
       <div v-if="store.videoWallpaper.enabled" class="effect-settings border-t border-line/80 pt-2">
         <div class="flex items-center gap-1.5">
-          <!-- 状态点：播放中=绿，暂停=琥珀。暂停时画面是静止的，
-               光看文件名分不出"卡住了"还是"我按了暂停"，这个点负责回答。 -->
+          <!-- 状态点：播放中=绿，暂停=琥珀，**没挂上=红**。
+               最后一种最要紧：此时"设置成功"是假的，桌面根本没有画面 ——
+               没有这个红点，用户只会以为壁纸"没生效"，完全无从判断原因。 -->
           <span
             class="flex shrink-0 items-center gap-1.5 text-[10.5px] text-faint"
             :title="
-              store.videoWallpaper.autoPause
-                ? `动态壁纸已自动暂停（${autoPauseText}），条件解除后自动恢复`
-                : store.videoWallpaper.paused
-                  ? '动态壁纸已暂停（画面冻结在当前帧）'
-                  : '动态壁纸播放中'
+              store.videoWallpaper.attachFailed
+                ? '窗口已创建，但没能挂到桌面层 —— 桌面不会有画面'
+                : store.videoWallpaper.autoPause
+                  ? `动态壁纸已自动暂停（${autoPauseText}），条件解除后自动恢复`
+                  : store.videoWallpaper.paused
+                    ? '动态壁纸已暂停（画面冻结在当前帧）'
+                    : '动态壁纸播放中'
             "
           >
             <span
               class="h-1.5 w-1.5 shrink-0 rounded-full"
-              :class="videoPaused ? 'bg-amber-400/90' : 'bg-ok/90'"
+              :class="
+                store.videoWallpaper.attachFailed
+                  ? 'bg-danger/90'
+                  : videoPaused
+                    ? 'bg-amber-400/90'
+                    : 'bg-ok/90'
+              "
             ></span>
             动态壁纸
           </span>
@@ -1220,6 +1253,39 @@ onUnmounted(() => {
           >
             {{ baseName(store.videoWallpaper.path) }}
           </span>
+          <!-- 诊断入口：画面看着不对（黑屏 / 只显示一块 / 图标被挡）时点这里。
+               只放图标（≈20px）—— 文件名那一格是 flex-1 + truncate，
+               加一个 shrink-0 的按钮不会把这一行撑破。 -->
+          <button
+            class="shrink-0 cursor-pointer rounded p-0.5 text-faint transition-colors hover:bg-panel-2 hover:text-accent"
+            title="诊断动态壁纸（检查桌面为什么没有画面）"
+            @click="diagVisible = true"
+          >
+            <NIcon :component="Activity" :size="12" />
+          </button>
+        </div>
+
+        <!-- 挂载失败提示：**常驻**而不是 toast —— 用户往往过一会儿才回来看桌面，
+             一闪而过的提示等于没说。文案给"能做什么"，不给错误码。
+             高度预算：只在失败时出现（≈40px），正常态不占位。
+             第二行给「运行诊断」——这是最需要诊断的场景，入口必须在这里出现一次。 -->
+        <div
+          v-if="store.videoWallpaper.attachFailed"
+          class="mt-1 rounded border border-danger/35 bg-danger/10 px-1.5 py-1 text-[10px] leading-relaxed text-danger/90"
+          title="窗口已经建好，但没能挂到桌面图标层之下。常见原因：开机自启时桌面还没准备好、被其他动态壁纸/桌面整理软件占用、远程桌面会话。"
+        >
+          <div>窗口建好了，但没能挂到桌面层，桌面不会有画面。</div>
+          <div class="mt-0.5 flex items-center gap-1.5">
+            <button
+              class="cursor-pointer underline decoration-dotted underline-offset-2 transition-colors hover:text-danger"
+              title="运行诊断，看看具体卡在哪一步"
+              @click="diagVisible = true"
+            >
+              运行诊断
+            </button>
+            <span class="text-danger/40">·</span>
+            <span class="text-danger/70">点「重新应用」再试一次</span>
+          </div>
         </div>
 
         <!-- 播放控制：停止 / 暂停 / 静音 **同占一行**（常驻，不折叠）。
@@ -1595,6 +1661,9 @@ onUnmounted(() => {
         </div>
       </div>
     </Teleport>
+
+    <!-- 动态壁纸诊断弹窗（自身 Teleport 到 body，放这里只为就近） -->
+    <DiagDialog v-model:show="diagVisible" />
 
   </main>
 </template>
