@@ -38,3 +38,7 @@ ui/.vite/
 
 # AI 协作工作目录：含探针采样数据 / 桌面截图等大文件，禁止提交
 .workbuddy-ai/
+
+# 本机构建环境脚本：硬编码了本机 MSVC / Windows SDK 绝对路径，换台机器即失效，
+# 提交上去对别人没有意义（用法见文件头注释，按需本地重建）
+scripts/cargo-env.sh
