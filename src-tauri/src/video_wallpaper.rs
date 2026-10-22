@@ -28,6 +28,13 @@
 //   （`is_attached_to_desktop`）+ `allow_spawn` 开关（巡检只读查找）
 //   + 巡检线程只启动一次（`WATCHER_STARTED`）。
 //
+//   第六条（2026-10-19 加，**别再拆开**）：**没挂到桌面层就不许可见。**
+//   `show()` 与"挂载成功"必须绑在一起 —— 这个窗口是
+//   `decorations(false) + shadow(false) + skip_taskbar(true)`，一旦在没挂上的情况下
+//   显示出来，就是一个无边框、无阴影、不在任务栏的小窗飘在桌面上（压着主界面、
+//   鼠标还能点到），用户报的"桌面上飘着一块壁纸图"就是它。同时**失败也必须登记
+//   句柄**，否则巡检够不着它、永远补不回来，只能重启程序。
+//
 //   为什么不是"每轮都比一次几何"：那看似省事，但一旦物理像素的比较在任何环境下
 //   失准（例如混合 DPI），就会退化成每 4s 一次 SetWindowPos → 又变回成因 ①。
 //   用指纹把"需要校正"限定在真正的配置变化时刻，稳定态才是绝对的零写操作。
@@ -36,7 +43,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -46,8 +53,9 @@ use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowExW, FindWindowW, GetAncestor, GetClassNameW, GetDesktopWindow,
     GetParent, GetWindowLongPtrW, GetWindowRect, IsWindow, IsWindowVisible, SendMessageTimeoutW,
-    SetParent, SetWindowLongPtrW, SetWindowPos, GA_PARENT, GWL_EXSTYLE, SMTO_ABORTIFHUNG,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW, SWP_NOSENDCHANGING, SWP_NOSIZE, WS_EX_NOACTIVATE,
+    SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow, GA_PARENT, GWL_EXSTYLE,
+    SMTO_ABORTIFHUNG, SW_HIDE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW, SWP_NOSENDCHANGING,
+    SWP_NOSIZE, WS_EX_NOACTIVATE,
 };
 
 /// 视频扩展名判定**只有一份**（在 `wallpaper.rs`），这里原样再导出。
@@ -417,6 +425,45 @@ fn watch_hwnds() -> &'static Mutex<Vec<isize>> {
     WATCH_HWNDS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// 巡检还允许"用力"重试几次（允许发 `WM_SPAWN_WORKERW`）的剩余预算。
+///
+/// **为什么需要**：首次挂载可能因为时序失败 —— 开机自启时应用常常比 explorer 的
+/// 桌面层先就位，此时 `find_desktop_workerw()` 三步全落空。而巡检默认走**只读**
+/// 查找（绝不发 0x052C，见成因 ③），遇到"那一层还没被创建"就会永远等不到。
+/// 给几次预算，把这类**瞬时**失败救回来。
+///
+/// **为什么必须有上限**：0x052C 会让整个桌面重排（可见闪一下）。每 4s 来一次
+/// 就是周期性闪屏 —— 正是本模块花最大代价才消除的那个成因。所以预算用完就
+/// 退回只读；重新创建窗口（用户点"应用/重新应用"）时再补一份。
+static SPAWN_BUDGET: AtomicU32 = AtomicU32::new(0);
+/// 每次新建置底窗口补充的预算（≈ 12s 内 3 次机会）
+const SPAWN_BUDGET_PER_CREATE: u32 = 3;
+
+/// 上一次挂载是否**失败**（桌面层没挂上 / 几何没摆上）。
+///
+/// 为什么需要它：`create_video_window` 里窗口 `build()` 成功就返回 Ok，
+/// 真正的挂载是 `on_page_load` 里异步做的 —— 所以"设置成功"这个提示
+/// **只代表窗口建出来了**，不代表壁纸真的出现在桌面上。
+/// 失败时窗口现在是保持隐藏的（见模块头部第六条），用户看到的就是
+/// "提示设置成功，但桌面什么都没变" —— 这条状态就是用来把这句话说清楚的。
+///
+/// 放在独立静态量里而不是塞进 `VideoWallpaperState`：它是**窗口层**的事实，
+/// 与"在播什么/暂停没"无关；`state_out()` 读它即可，不必给状态结构加字段、
+/// 也不用改各处 `*s = VideoWallpaperState { .. }` 的构造。
+static ATTACH_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// 更新"挂载失败"标记，**变化时**广播一次完整状态。
+///
+/// 只在真正翻转时 emit：巡检每 4s 都会走一遍失败分支，不判变化就是每 4s
+/// 一次全窗口广播（本模块一贯的"没事就别喊"）。
+fn set_attach_failed(app: &tauri::AppHandle, failed: bool) {
+    if ATTACH_FAILED.swap(failed, Ordering::SeqCst) == failed {
+        return;
+    }
+    let snapshot = state_out(&state().lock().unwrap().clone());
+    let _ = app.emit(VIDEO_STATE_EVENT, snapshot);
+}
+
 /// 已"就位"的窗口集合：一旦某窗口完成首次挂载 + 几何设置，就记入本表。
 /// 重挂线程对已就位窗口**只读校验、绝不写入** —— 这是消除残留闪屏的关键。
 ///
@@ -531,6 +578,11 @@ pub struct VideoWallpaperStateOut {
     /// 后端不知道视频时长（那是解码器的事），只能用一个哨兵值表达"不设终点"。
     /// 播放页拿到 0 会替换成 `duration`，见其 `effectiveEnd()`。
     pub clip_end: f64,
+    /// **上次挂载是否失败**：窗口建出来了，但没能挂到桌面层（或没摆上位置）。
+    ///
+    /// 前端据此把"设置成功"改成一句实话。历史行为是静默失败 ——
+    /// 用户看到"设置成功"，桌面上却什么都没变，完全无从判断。
+    pub attach_failed: bool,
 }
 
 /// 显示器描述（供前端渲染选择列表）
@@ -571,121 +623,228 @@ struct EnumCtx {
     def_view: PCWSTR,
 }
 
-/// 查找桌面图标层之下的背景 WorkerW：
-/// 1) EnumWindows 直接找"类名 WorkerW 且含 SHELLDLL_DefView"的图标层，取其父；
-/// 2) Win11 退化：Progman 下不含 DefView 的可见 WorkerW 即壁纸层；
-/// 3) 仍找不到才 SendMessageW 0x052C（WM_SPAWN_WORKERW）触发生成，再枚举一次。
+/// 在 Progman 的**所有** WorkerW 子窗口里找壁纸层：可见、且自身不含 `SHELLDLL_DefView`。
 ///
-/// 修复要点：**Progman 找不到也必须继续尝试**。历史实现在 FindWindowW("Progman")
-/// 失败时直接 return None，导致窗口完全无法挂到桌面层（浮在普通顶层），
-/// 表现为"多显示器有些屏根本不显示壁纸"。
-fn find_desktop_workerw() -> Option<HWND> {
-    /// EnumWindows 回调：命中"含 SHELLDLL_DefView 的 WorkerW"时记录其父并停止枚举
+/// **必须遍历全部子窗口，不能只看第一个。** Progman 下通常有**两个** WorkerW：
+/// 图标层（含 `SHELLDLL_DefView`）与壁纸层。历史实现只取
+/// `FindWindowExW(progman, None, "WorkerW", null)` 的第一个 —— 第一个恰好是图标层时
+/// 直接放弃、落到"发 0x052C"，白白让整个桌面重排一次；而第 3 步的兜底分支更糟：
+/// 它**不检查 has_def_view** 就把第一个 WorkerW 返回，等于把壁纸塞进图标层。
+///
+/// 这两种情况在布局稍有不同的机器上（Win10 与 Win11 24H2 的子窗口顺序不一样）
+/// 就是"动态壁纸挂不上"的直接原因。
+unsafe fn wallpaper_workerw_under(
+    progman: HWND,
+    workerw: PCWSTR,
+    def_view: PCWSTR,
+) -> Option<HWND> {
+    let mut cur = FindWindowExW(progman, None, workerw, PCWSTR::null()).ok()?;
+    // 防御性上界：子窗口数量异常时别在这里死循环（正常不会超过 3 个）
+    for _ in 0..32 {
+        if cur.0.is_null() {
+            return None;
+        }
+        if IsWindowVisible(cur).as_bool() {
+            let has_def_view = FindWindowExW(cur, None, def_view, PCWSTR::null())
+                .map(|h| !h.0.is_null())
+                .unwrap_or(false);
+            if !has_def_view {
+                return Some(cur);
+            }
+        }
+        cur = FindWindowExW(progman, cur, workerw, PCWSTR::null()).ok()?;
+    }
+    None
+}
+
+/// 在给定父窗口的**子窗口**里找"含 `SHELLDLL_DefView` 的 WorkerW"（图标层）。
+///
+/// Win11 24H2 布局下图标层可能是 `Progman` 的子窗口，而 `EnumWindows` 只枚举
+/// 顶层窗口、看不到它，必须再往下一层找。
+///
+/// 与顶层版一样**要求可见**：explorer 重启会留下坐标 (-32000, -317762)、尺寸 0×0 的
+/// "幽灵" `SHELLDLL_DefView`，命中它等于把壁纸挂到一个不存在的矩形里。
+unsafe fn icon_worker_under(parent: HWND, workerw: PCWSTR, def_view: PCWSTR) -> Option<HWND> {
+    let mut cur = FindWindowExW(parent, None, workerw, PCWSTR::null()).ok()?;
+    for _ in 0..32 {
+        if cur.0.is_null() {
+            return None;
+        }
+        if IsWindowVisible(cur).as_bool() {
+            let has_def_view = FindWindowExW(cur, None, def_view, PCWSTR::null())
+                .map(|h| !h.0.is_null())
+                .unwrap_or(false);
+            if has_def_view {
+                return Some(cur);
+            }
+        }
+        cur = FindWindowExW(parent, cur, workerw, PCWSTR::null()).ok()?;
+    }
+    None
+}
+
+/// 在**顶层**窗口里找图标层 WorkerW —— Win10 布局：
+/// `SHELLDLL_DefView` 就在一个顶层 `WorkerW` 里面，而 `Progman` 下没有任何子窗口。
+///
+/// **要求 WorkerW 本身可见**：同 `icon_worker_under`，避开 explorer 重启留下的幽灵层。
+unsafe fn top_level_icon_worker(def_view: PCWSTR) -> Option<HWND> {
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let ctx = &mut *(lparam.0 as *mut EnumCtx);
         let mut buf = [0u16; 256];
         let len = GetClassNameW(hwnd, &mut buf);
-        if len > 0 {
-            let class = String::from_utf16_lossy(&buf[..len as usize]);
-            if class == "WorkerW" {
-                let Ok(def_view) = FindWindowExW(hwnd, None, ctx.def_view, PCWSTR::null()) else {
-                    return BOOL(1);
-                };
-                if !def_view.0.is_null() {
-                    let Ok(parent) = GetParent(hwnd) else {
-                        return BOOL(1);
-                    };
-                    let target = if !parent.0.is_null() { parent } else { hwnd };
-                    *ctx.found = Some(target);
-                    return BOOL(0); // 找到即停止枚举
+        if len > 0 && String::from_utf16_lossy(&buf[..len as usize]) == "WorkerW" {
+            if IsWindowVisible(hwnd).as_bool() {
+                if let Ok(def_view) = FindWindowExW(hwnd, None, ctx.def_view, PCWSTR::null()) {
+                    if !def_view.0.is_null() {
+                        *ctx.found = Some(hwnd);
+                        return BOOL(0); // 找到即停止枚举
+                    }
                 }
             }
         }
         BOOL(1)
     }
 
-    /// 执行一次全量枚举，返回命中结果
-    unsafe fn enum_for_defview(ctx: &mut EnumCtx) {
-        let _ = EnumWindows(Some(enum_proc), LPARAM((ctx) as *mut EnumCtx as isize));
-    }
+    let mut found: Option<HWND> = None;
+    let mut ctx = EnumCtx {
+        found: &mut found,
+        def_view,
+    };
+    let _ = EnumWindows(Some(enum_proc), LPARAM((&mut ctx) as *mut EnumCtx as isize));
+    found
+}
 
+/// 由图标层推导壁纸层 —— **本模块最易错的一步，两种 shell 布局完全不同**。
+///
+/// ① 图标层是 `Progman` 的子窗口（Win11 24H2）→ 父窗口就是壁纸容器：
+///    我们的窗口挂到父窗口下、再沉到 `HWND_BOTTOM`，正好落在图标层 `WorkerW` 之下。
+///
+/// ② 图标层**本身是顶层窗口**（Win10）→ 壁纸层是 z 序紧随其后的那个顶层 `WorkerW`
+///    （由 `WM_SPAWN_WORKERW` 生成、压在图标层下面），必须用 `FindWindowExW` 的
+///    "从某个兄弟之后继续找"形式取它，并跳过任何含 `DefView` 的窗口。
+///
+/// **② 绝不能用 `GetParent` 去取父窗口**：顶层窗口的 `GetParent` 返回 `NULL`，
+/// 而 windows-rs 把 `NULL` 当成 `Err`。历史实现写的是
+/// `let Ok(parent) = GetParent(hwnd) else { return BOOL(1) };`，
+/// 于是**整个回调被跳过**、`found` 恒为 `None` → Win10 机器上永远找不到挂载点。
+/// 症状：UI 提示"设置成功"，桌面上却一片空白（2026-10-19 远程机器实测确认）。
+unsafe fn wallpaper_from_icon_worker(
+    icon: HWND,
+    workerw: PCWSTR,
+    def_view: PCWSTR,
+) -> Option<HWND> {
+    // ① 嵌套布局：父窗口即壁纸容器
+    if let Ok(parent) = GetParent(icon) {
+        if !parent.0.is_null() {
+            return Some(parent);
+        }
+    }
+    // ② 顶层布局：图标层之后第一个"可见、且不含 DefView 的顶层 WorkerW"
+    //
+    // **必须判 `IsWindowVisible`**：真实机器上存在一堆隐藏的垃圾 WorkerW
+    // （实测一台机器上有 14 个，尺寸 136×39 / 236×64，属于 DWM / 输入法之类）。
+    // 只看"不含 DefView"就会挑中它们 —— 挂到一个 236×64 的隐藏窗口上，
+    // 画面被裁成一条、且永远不可见。
+    let top = HWND(std::ptr::null_mut());
+    let mut cur = FindWindowExW(top, icon, workerw, PCWSTR::null()).ok()?;
+    for _ in 0..16 {
+        if cur.0.is_null() {
+            return None;
+        }
+        if IsWindowVisible(cur).as_bool() {
+            let has_def_view = FindWindowExW(cur, None, def_view, PCWSTR::null())
+                .map(|h| !h.0.is_null())
+                .unwrap_or(false);
+            if !has_def_view {
+                return Some(cur);
+            }
+        }
+        cur = FindWindowExW(top, cur, workerw, PCWSTR::null()).ok()?;
+    }
+    None
+}
+
+/// 查找"桌面图标层之下"的壁纸层窗口（置底窗口要挂到它下面）。
+///
+/// 两种 shell 布局都必须命中，这是历史 bug 的集中地：
+///   - **Win10**：`SHELLDLL_DefView` 在**顶层** `WorkerW` 里，`Progman` 下没有任何子窗口；
+///   - **Win11 24H2**：`SHELLDLL_DefView` 是 `Progman` 的直接子窗口，或在其子 `WorkerW` 里。
+///
+/// 查找顺序（前两步**纯只读**，不发任何消息 → 不闪屏）：
+///   1) 定位图标层，再由它推导壁纸层（见 `wallpaper_from_icon_worker`）；
+///   2) `Progman` 下不含 `DefView` 的可见 `WorkerW`；
+///   3) 仍找不到且 `allow_spawn` 为真 → 发 `WM_SPAWN_WORKERW`(0x052C) 生成后重试 1)2)。
+///
+/// `allow_spawn` 的两条调用路径**绝不能混用**（详见 `attach_to_desktop`）：
+/// 该消息会让整个桌面重排，巡检每 4s 跑一次，绝不能每轮都发。
+pub(crate) fn find_wallpaper_layer(allow_spawn: bool) -> Option<HWND> {
     let progman_name = wide("Progman");
     let def_view_name = wide("SHELLDLL_DefView");
     let workerw_name = wide("WorkerW");
-
-    // Progman 可能取不到（部分 shell 环境/时机），用 Option 承载并在后续分支兜底
-    let progman: Option<HWND> = unsafe {
-        match FindWindowW(PCWSTR(progman_name.as_ptr()), PCWSTR::null()) {
-            Ok(h) if !h.0.is_null() => Some(h),
-            _ => None,
-        }
-    };
+    let def_view = PCWSTR(def_view_name.as_ptr());
+    let workerw = PCWSTR(workerw_name.as_ptr());
 
     unsafe {
-        // ---- 第 1 步：直接枚举（不发送任何消息，避免桌面重排 → 闪屏）----
-        let mut found: Option<HWND> = None;
-        let mut ctx = EnumCtx {
-            found: &mut found,
-            def_view: PCWSTR(def_view_name.as_ptr()),
-        };
-        enum_for_defview(&mut ctx);
-        if found.is_some() {
-            return found;
-        }
-
-        // ---- 第 2 步：Progman 下的可见 WorkerW（不含 DefView）即壁纸层 ----
-        if let Some(progman) = progman {
-            if let Ok(worker) =
-                FindWindowExW(progman, None, PCWSTR(workerw_name.as_ptr()), PCWSTR::null())
-            {
-                if !worker.0.is_null() && IsWindowVisible(worker).as_bool() {
-                    let has_def_view = match FindWindowExW(
-                        worker,
-                        None,
-                        PCWSTR(def_view_name.as_ptr()),
-                        PCWSTR::null(),
-                    ) {
-                        Ok(h) => !h.0.is_null(),
-                        Err(_) => false,
-                    };
-                    if !has_def_view {
-                        return Some(worker);
-                    }
-                }
-            }
-
-            // ---- 第 3 步：最后手段，发送 WM_SPAWN_WORKERW 生成桌面层后重试 ----
-            // 该消息会触发桌面重排（可能瞬闪），故仅在前两步都失败时使用。
-            let _ = SendMessageTimeoutW(
-                progman,
-                0x052C,
-                windows::Win32::Foundation::WPARAM(0),
-                LPARAM(0),
-                SMTO_ABORTIFHUNG,
-                500,
-                None,
-            );
-            let mut found2: Option<HWND> = None;
-            let mut ctx2 = EnumCtx {
-                found: &mut found2,
-                def_view: PCWSTR(def_view_name.as_ptr()),
+        // Progman 可能取不到（部分 shell 环境/时机），后续分支各自兜底
+        let progman: Option<HWND> =
+            match FindWindowW(PCWSTR(progman_name.as_ptr()), PCWSTR::null()) {
+                Ok(h) if !h.0.is_null() => Some(h),
+                _ => None,
             };
-            enum_for_defview(&mut ctx2);
-            if found2.is_some() {
-                return found2;
-            }
-            // 生成后 Progman 下可能出现新的可见 WorkerW，再查一次
-            if let Ok(worker) =
-                FindWindowExW(progman, None, PCWSTR(workerw_name.as_ptr()), PCWSTR::null())
-            {
-                if !worker.0.is_null() && IsWindowVisible(worker).as_bool() {
-                    return Some(worker);
+
+        // 一次完整的查找。**前两步不发送任何消息** —— 发了就会让整个桌面重排。
+        let probe = || -> Option<HWND> {
+            // ---- 第 1 步：定位图标层，再由它推导壁纸层 ----
+            // 顶层 WorkerW（Win10）优先，其次 Progman 的子 WorkerW（Win11 24H2）。
+            let icon = top_level_icon_worker(def_view)
+                .or_else(|| progman.and_then(|p| icon_worker_under(p, workerw, def_view)));
+            if let Some(icon) = icon {
+                if let Some(w) = wallpaper_from_icon_worker(icon, workerw, def_view) {
+                    return Some(w);
                 }
             }
+
+            // ---- 第 2 步：Progman 下**任意一个**可见且不含 DefView 的 WorkerW 即壁纸层 ----
+            // 遍历全部子窗口（见 `wallpaper_workerw_under`）：只看第一个会在
+            // "图标层排在前面"的布局上误判成"没有壁纸层"。
+            if let Some(p) = progman {
+                if let Some(w) = wallpaper_workerw_under(p, workerw, def_view) {
+                    return Some(w);
+                }
+            }
+            None
+        };
+
+        if let Some(w) = probe() {
+            return Some(w);
         }
 
-        None
+        // ---- 第 3 步：最后手段，发送 WM_SPAWN_WORKERW 生成桌面层后重试 ----
+        // 该消息会触发桌面重排（可能瞬闪），故只允许首次挂载 / 预算内的巡检重试，
+        // 巡检常态（每 4s 一轮）绝不能带它。
+        if !allow_spawn {
+            return None;
+        }
+        let progman = progman?;
+        let _ = SendMessageTimeoutW(
+            progman,
+            0x052C,
+            windows::Win32::Foundation::WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG,
+            500,
+            None,
+        );
+        probe()
     }
+}
+
+/// 首次挂载专用：允许在最后一步发 `WM_SPAWN_WORKERW` 把桌面层生出来。
+///
+/// 只在 `on_page_load`（新窗口首次挂载）与巡检的预算内重试里用 ——
+/// 该消息会让整个桌面重排，稳定态绝不能带它。见 `find_wallpaper_layer`。
+fn find_desktop_workerw() -> Option<HWND> {
+    find_wallpaper_layer(true)
 }
 
 /// 取窗口的**真实父窗口**：`GetAncestor(hwnd, GA_PARENT)`。
@@ -714,7 +873,7 @@ fn find_desktop_workerw() -> Option<HWND> {
 ///
 /// 注意 `GA_PARENT` 对**真正的顶层窗口**返回的是**桌面窗口**而不是 NULL，
 /// 所以判"是否已挂载"必须用 `is_attached_to_desktop()`，不能只判非空。
-fn real_parent(hwnd: HWND) -> HWND {
+pub(crate) fn real_parent(hwnd: HWND) -> HWND {
     unsafe { GetAncestor(hwnd, GA_PARENT) }
 }
 
@@ -723,7 +882,7 @@ fn real_parent(hwnd: HWND) -> HWND {
 /// 顶层窗口的 `GA_PARENT` 就是桌面窗口 —— 那是"浮在桌面上、并未挂载"的状态，
 /// 必须排除，否则巡检会以为一个普通顶层窗口"已就位"而永不自愈
 /// （症状：窗口没挂到图标层下面，却再也不会被纠正）。
-fn is_attached_to_desktop(hwnd: HWND) -> bool {
+pub(crate) fn is_attached_to_desktop(hwnd: HWND) -> bool {
     let p = real_parent(hwnd);
     if p.0.is_null() {
         return false;
@@ -743,10 +902,13 @@ fn is_attached_to_desktop(hwnd: HWND) -> bool {
 /// `allow_spawn` 区分两条调用路径，**绝不能混用**：
 /// - `true`：首次挂载（`on_page_load`）。此时桌面层可能还不存在，
 ///   允许 `find_desktop_workerw()` 发 `WM_SPAWN_WORKERW` 把它生出来。
-/// - `false`：巡检路径。**必须走只读查找** —— 那条消息会让整个桌面重排，
-///   正在播放的视频会整屏闪一下，而巡检每 4s 跑一次。
-///   历史缺陷：巡检调用的也是本函数，而本函数内部一律用带 0x052C 兜底的
-///   `find_desktop_workerw()` —— 注释里写着"巡检绝不发 0x052C"，代码却做不到。
+/// - `false`：巡检路径的**常态**。那条消息会让整个桌面重排，正在播放的视频会整屏
+///   闪一下，而巡检每 4s 跑一次。
+///
+/// **唯一的例外**：巡检遇到"脱挂"时，前几次（`SPAWN_BUDGET`）允许带 spawn ——
+/// 用来救"开机自启时应用比桌面层先就位"这类瞬时失败。预算用完立刻退回只读。
+/// 历史缺陷：巡检调用的也是本函数，而本函数内部一律用带 0x052C 兜底的
+/// `find_desktop_workerw()` —— 注释里写着"巡检绝不发 0x052C"，代码却做不到。
 fn attach_to_desktop(hwnd: HWND, allow_spawn: bool) -> Option<HWND> {
     unsafe {
         let worker = if allow_spawn {
@@ -877,72 +1039,52 @@ fn set_no_activate(hwnd: HWND) {
     }
 }
 
+/// **没挂到桌面层就不许可见** —— 否则它就是一个飘在桌面上的无边框小窗。
+///
+/// 这是"挂载失败"唯一正确的兜底。两种情况都会走到这里：
+///   ① 首次挂载就失败（时序 / shell 布局差异）—— 创建时是 `visible(false)`，
+///      只要不 `show()` 本来就看不见，这里只是兜底；
+///   ② **已经显示过**的窗口后来脱挂（父窗口被销毁、explorer 重建）—— 这一条最要紧：
+///      不藏起来，它就会以旧几何留在桌面上，鼠标还能点到。
+///
+/// 只在**可见时**才调 `ShowWindow`：对已隐藏的窗口反复调用没有意义，而
+/// `ShowWindow` 本身会重建绘制表面（见 `SETTLED` 的注释）。
+fn hide_if_visible(hwnd: HWND) {
+    unsafe {
+        if IsWindowVisible(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
+/// 就位之后把窗口显示出来。
+///
+/// **只在不可见时调用** —— 可见时再 `show()` 会重建绘制表面，正在播的视频会闪一下。
+/// 存在的理由：窗口建出来是 `visible(false)`，首次挂载失败时我们刻意没有 `show()`；
+/// 巡检把它补挂好之后必须补这一下，否则"修好了但一直是黑的"。
+fn ensure_visible(app: &tauri::AppHandle, index: usize, hwnd: HWND) {
+    if unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return;
+    }
+    if let Some(win) = app.get_webview_window(&window_label_for(index)) {
+        let _ = win.show();
+    }
+}
+
 /// 巡检专用的 **只读** WorkerW 查找：绝不发送 `WM_SPAWN_WORKERW`。
 ///
 /// `find_desktop_workerw()` 的兜底第 3 步会发送 0x052C 触发生成桌面层，
 /// 而该消息会让整个桌面重排 —— 正在播放的视频会整屏闪一下。
 /// 巡检每 4s 跑一次，绝不能带这种副作用；找不到就返回 None，
 /// 由调用方按"父窗口非空 = 仍挂在桌面层"保守处理，等下一轮再判断。
+///
+/// （巡检带 spawn 的唯一入口是 `SPAWN_BUDGET` 那几次 —— 那是给"桌面层还没被
+/// 创建出来"的瞬时失败留的，与"每轮都发"是两件事，别在这里开口子。）
+///
+/// **查找逻辑与首次挂载完全共用 `find_wallpaper_layer`** —— 历史实现是两份独立的
+/// 枚举代码，于是同一个 `GetParent` 缺陷修了一份漏了另一份（Win10 布局下两份都失效）。
 fn find_desktop_workerw_readonly() -> Option<HWND> {
-    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let ctx = &mut *(lparam.0 as *mut EnumCtx);
-        let mut buf = [0u16; 256];
-        let len = GetClassNameW(hwnd, &mut buf);
-        if len > 0 && String::from_utf16_lossy(&buf[..len as usize]) == "WorkerW" {
-            let Ok(def_view) = FindWindowExW(hwnd, None, ctx.def_view, PCWSTR::null()) else {
-                return BOOL(1);
-            };
-            if !def_view.0.is_null() {
-                let Ok(parent) = GetParent(hwnd) else {
-                    return BOOL(1);
-                };
-                *ctx.found = Some(if !parent.0.is_null() { parent } else { hwnd });
-                return BOOL(0);
-            }
-        }
-        BOOL(1)
-    }
-
-    let def_view_name = wide("SHELLDLL_DefView");
-    unsafe {
-        let mut found: Option<HWND> = None;
-        let mut ctx = EnumCtx {
-            found: &mut found,
-            def_view: PCWSTR(def_view_name.as_ptr()),
-        };
-        let _ = EnumWindows(Some(enum_proc), LPARAM((&mut ctx) as *mut EnumCtx as isize));
-        if found.is_some() {
-            return found;
-        }
-    }
-    // 退化查法：Progman 下不含 DefView 的可见 WorkerW（同样只读，不发消息）
-    let progman_name = wide("Progman");
-    let workerw_name = wide("WorkerW");
-    unsafe {
-        let progman = match FindWindowW(PCWSTR(progman_name.as_ptr()), PCWSTR::null()) {
-            Ok(h) if !h.0.is_null() => h,
-            _ => return None,
-        };
-        if let Ok(worker) =
-            FindWindowExW(progman, None, PCWSTR(workerw_name.as_ptr()), PCWSTR::null())
-        {
-            if !worker.0.is_null() && IsWindowVisible(worker).as_bool() {
-                let has_def_view = match FindWindowExW(
-                    worker,
-                    None,
-                    PCWSTR(def_view_name.as_ptr()),
-                    PCWSTR::null(),
-                ) {
-                    Ok(h) => !h.0.is_null(),
-                    Err(_) => false,
-                };
-                if !has_def_view {
-                    return Some(worker);
-                }
-            }
-        }
-    }
-    None
+    find_wallpaper_layer(false)
 }
 
 /// 上次已经打印过的"补建窗口失败"信息。
@@ -1076,21 +1218,42 @@ fn spawn_relink_watcher(app: tauri::AppHandle) {
                         apply_geo_if_changed(hwnd, geo, cur_parent);
                     }
                     mark_settled(hwnd);
+                    // 已挂载但没显示（首次挂载失败后由本分支救回来的那一类）→ 补显示。
+                    // 稳定态不会走到这里：`is_settled` 为真且配置没变时本分支不进入。
+                    ensure_visible(&app, i, hwnd);
                 }
                 continue;
             }
 
-            // ---- 父窗口确实失效（explorer 重启等）→ 重新挂载 ----
-            // `allow_spawn = false`：巡检**绝不能**发 WM_SPAWN_WORKERW，
-            // 那条消息会让整个桌面重排 → 正在播放的视频整屏闪一下。
+            // ---- 父窗口确实失效（explorer 重启 / 首次就没挂上）→ 重新挂载 ----
+            //
+            // `allow_spawn` 平时必须是 false：0x052C 会让整个桌面重排 → 正在播放的
+            // 视频整屏闪一下，而巡检每 4s 跑一次。唯一的例外是**瞬时失败**（最典型的是
+            // 开机自启时应用比 explorer 的桌面层先就位），用 `SPAWN_BUDGET` 给有限的
+            // 几次机会，预算用完自动退回只读。
             unmark_settled(*h);
-            let Some(parent) = attach_to_desktop(hwnd, false) else {
+            let allow_spawn = SPAWN_BUDGET
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+                .is_ok();
+            let Some(parent) = attach_to_desktop(hwnd, allow_spawn) else {
+                // 挂不上 → 立刻藏起来。绝不把"没挂到桌面层"的窗口留在屏幕上：
+                // 那正是用户看到的"桌面上飘着一块壁纸图、鼠标还能点到"。
+                hide_if_visible(hwnd);
+                // 如实上报（只在翻转时广播一次），面板据此显示"没能挂到桌面层"。
+                set_attach_failed(&app, true);
                 continue;
             };
-            if let Some(geo) = monitor_geo(&app, mon, parent) {
-                apply_geo_if_changed(hwnd, geo, parent);
-            }
+            let Some(geo) = monitor_geo(&app, mon, parent) else {
+                hide_if_visible(hwnd);
+                set_attach_failed(&app, true);
+                continue;
+            };
+            apply_geo_if_changed(hwnd, geo, parent);
             mark_settled(hwnd);
+            // 补挂成功后补一次显示：首次挂载失败时我们刻意没 show() 过它，
+            // 不补这一下就成了"挂好了但一直是黑的"。
+            ensure_visible(&app, i, hwnd);
+            set_attach_failed(&app, false);
         }
 
         // 热插拔补齐（插屏）：对**选中且在播放**的显示器补建缺失窗口。
@@ -1196,7 +1359,7 @@ fn targets_of(st: &VideoWallpaperState, monitor_count: usize) -> Vec<usize> {
 }
 
 /// 计算各显示器对应的窗口 label
-fn window_label_for(index: usize) -> String {
+pub(crate) fn window_label_for(index: usize) -> String {
     format!("{VIDEO_WINDOW_LABEL_PREFIX}-{index}")
 }
 
@@ -1264,6 +1427,7 @@ fn state_out(s: &VideoWallpaperState) -> VideoWallpaperStateOut {
         loop_mode: s.loop_mode.as_code(),
         clip_start: s.clip_start,
         clip_end: s.clip_end,
+        attach_failed: ATTACH_FAILED.load(Ordering::SeqCst),
     }
 }
 
@@ -1711,6 +1875,11 @@ fn create_video_window(app: &tauri::AppHandle, index: usize) -> Result<(), Strin
     let app_for_cb = app.clone();
     let index_for_cb = index;
 
+    // 新建窗口 = 一次全新的尝试，补一份"允许发力重挂"的预算（见 `SPAWN_BUDGET`）。
+    // 放在这里而不是启动时：用户点"应用/重新应用动态壁纸"、热插拔补建，
+    // 都应该重新获得几次"发 0x052C 把桌面层生出来"的机会。
+    SPAWN_BUDGET.store(SPAWN_BUDGET_PER_CREATE, Ordering::SeqCst);
+
     // 关于"有声音时能否自动播放"：
     //   置底窗口永远不会获得用户手势（它挂在桌面图标层下、且带 WS_EX_NOACTIVATE），
     //   所以"取消静音"后能不能继续出声，取决于 Chromium 的自动播放策略。
@@ -1731,38 +1900,39 @@ fn create_video_window(app: &tauri::AppHandle, index: usize) -> Result<(), Strin
             if let Ok(tauri_hwnd) = window.hwnd() {
                 let hwnd = HWND(tauri_hwnd.0);
                 set_no_activate(hwnd);
-                // 挂载 + 摆位都完成后才登记句柄、标记就位。
                 // `allow_spawn = true`：这是首次挂载，桌面层可能还不存在，
                 // 允许发送 WM_SPAWN_WORKERW 把它生出来（只此一处允许）。
-                //
-                // **登记句柄也必须以成功为前提**：登记表是巡检的"这个窗口存在且已就位"
-                // 依据，给一个没挂上的窗口登记非 0 句柄，巡检就再也不会去补挂它。
-                if setup_window(&app_for_cb, hwnd, index_for_cb, true) {
-                    // 记录句柄（按 label 序号位置写入，供巡检线程按序号取用）
-                    if let Some(idx) = label_for_cb
-                        .rsplit('-')
-                        .next()
-                        .and_then(|s| s.parse::<usize>().ok())
-                    {
-                        let mut v = watch_hwnds().lock().unwrap();
-                        if v.len() <= idx {
-                            v.resize(idx + 1, 0);
-                        }
-                        v[idx] = hwnd.0 as isize;
+                let placed = setup_window(&app_for_cb, hwnd, index_for_cb, true);
+
+                // **句柄无条件登记 —— 成功失败都登记。**
+                // 登记表是巡检唯一的"要照看哪些窗口"依据。历史写法只在 setup 成功时
+                // 才登记，于是"挂载失败"被放大成"永久可见的错误窗口"：巡检够不着它，
+                // 永远不会补挂，它就一直以创建时的默认几何飘在桌面上，直到重启程序。
+                // 现在失败也登记，交给巡检每 4s 重试（见 `SPAWN_BUDGET`）。
+                if let Some(idx) = label_for_cb
+                    .rsplit('-')
+                    .next()
+                    .and_then(|s| s.parse::<usize>().ok())
+                {
+                    let mut v = watch_hwnds().lock().unwrap();
+                    if v.len() <= idx {
+                        v.resize(idx + 1, 0);
                     }
+                    v[idx] = hwnd.0 as isize;
                 }
-                // **显示与否必须单独判断，不能用"父窗口是否为空"代替。**
-                // 挂载（SetParent）与显示（WS_VISIBLE）是两件独立的事：挂到 WorkerW
-                // 下并不会让窗口可见。窗口创建时是 `visible(false)`，所以首次必须
-                // `show()` 一次；之后页面若再次加载就不该再调 —— `show()` 会重建
-                // 绘制表面，正在播的视频会闪一下。
-                //
-                // 历史写法是 `let already_attached = !GetParent(hwnd).is_null();`
-                // 而 `GetParent` 对本窗口恒返回 NULL，于是**每次页面加载都会
-                // 多调一次 `show()`**（多一次闪屏），且判据本身是错的。
-                if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+
+                // **只有真正就位才显示。**
+                // 挂载（SetParent）与显示（WS_VISIBLE）是两件独立的事：挂到 WorkerW 下
+                // 并不会让窗口可见，所以成功时必须 show() 一次。但**失败时绝不能 show()**：
+                // 这个窗口是 `decorations(false) + shadow(false) + skip_taskbar(true)`，
+                // 一旦显示就是一个无边框、无阴影、不在任务栏的小窗，压在桌面上、
+                // 鼠标还能点到 —— 用户报过的那块"飘着的壁纸图"就是它。
+                // 失败时保持 hidden，等巡检把它挂好、摆好，再由巡检补一次 show()。
+                if placed && !unsafe { IsWindowVisible(hwnd) }.as_bool() {
                     let _ = window.show();
                 }
+                // 把"到底挂上没有"如实告诉前端：`build()` 成功 ≠ 壁纸出现在桌面上。
+                set_attach_failed(&app_for_cb, !placed);
             }
         });
 
@@ -1811,6 +1981,8 @@ pub async fn stop_video_wallpaper(app: tauri::AppHandle) -> Result<(), String> {
     // 这里主动收尾，避免最后一条记录永远停在"进行中"。
     close_auto_pause_record();
     close_all_video_windows(&app);
+    // 停止后"挂载失败"就没有意义了（本来就不该有壁纸），清掉免得面板留着一句红字
+    set_attach_failed(&app, false);
     Ok(())
 }
 

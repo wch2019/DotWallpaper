@@ -191,12 +191,16 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     monitors: number[];
     paused: boolean;
     autoPause: string | null;
+    // 后端**上次挂载是否失败**：窗口建出来了，但没能挂到桌面层。
+    // "设置成功"只代表窗口建出来了 —— 这个字段才回答"桌面到底有没有画面"。
+    attachFailed: boolean;
   }>({
     enabled: false,
     path: "",
     monitors: [],
     paused: false,
     autoPause: null,
+    attachFailed: false,
   });
 
   // 动态壁纸静音偏好（持久化）。
@@ -1290,6 +1294,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       monitors: [],
       paused: false,
       autoPause: null,
+      attachFailed: false,
     };
     // 清除"上次生效项"：停止是明确的用户意图，
     // 不清掉的话下次启动会自作主张地又播起来。
@@ -1329,6 +1334,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
         auto_pause?: string | null;
         clip_start?: number;
         clip_end?: number;
+        attach_failed?: boolean;
       };
       const monitors = Array.isArray(st.monitors) ? st.monitors : [];
       videoWallpaper.value = {
@@ -1337,6 +1343,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
         monitors,
         paused: !!st.paused,
         autoPause: st.auto_pause ?? null,
+        attachFailed: !!st.attach_failed,
       };
       videoClipStart.value = Number(st.clip_start) || 0;
       videoClipEnd.value = Number(st.clip_end) || 0;
@@ -1367,6 +1374,18 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     // 后端是"先落历史、再广播"，所以这里回拉必定拿到含本次变化的新列表：
     // 进入暂停时多一条"进行中"，解除时那条刚补上时长。
     void loadAutoPauseHistory();
+  }
+
+  /// 后端广播"挂载失败"状态 → 同步到面板。
+  ///
+  /// 单独一个函数而不是塞进 `syncVideoAutoPause`：两者的触发源完全不同
+  /// （一个是环境检测，一个是窗口挂载），混在一起以后没法单独改。
+  /// 这个字段是**唯一**能让用户知道"提示设置成功、桌面却什么都没变"的线索。
+  function syncVideoAttachFailed(payload: { attach_failed?: boolean } | null) {
+    if (!payload) return;
+    const next = !!payload.attach_failed;
+    if (videoWallpaper.value.attachFailed === next) return;
+    videoWallpaper.value = { ...videoWallpaper.value, attachFailed: next };
   }
 
   // 应用启动时**自动恢复**上次的动态壁纸：退出前设过、且没有被主动停止的话，
@@ -1670,6 +1689,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     stopVideoWallpaper,
     loadVideoWallpaperState,
     syncVideoAutoPause,
+    syncVideoAttachFailed,
     loadAutoPauseHistory,
     restoreVideoWallpaper,
     setEffect,

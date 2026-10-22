@@ -669,6 +669,22 @@ async function stopWallpaper() {
   }
 }
 
+/// 吞掉 WebView2 的默认右键菜单。
+///
+/// **这是本页唯一需要的修改** —— 挂载位置由后端负责，这里不碰。
+///
+/// 置底窗口本该被桌面图标层（`SHELLDLL_DefView`）挡在下面、收不到鼠标；
+/// 但**桌面图标被关掉时那一层会被隐藏**（右键桌面 → 查看 → 显示桌面图标，
+/// 用户的合法设置，不是 bug），鼠标就直接穿透到我们身上。此时右键会弹出
+/// WebView2 自带的媒体菜单（循环 / 将视频另存为 / 画中画 / 截图 Ctrl+Shift+S）
+/// —— 那是浏览器 UI，出现在"桌面背景"上非常突兀。
+///
+/// 用 window 级监听而不是给根元素挂 `@contextmenu.prevent`：这一页除 `.video-wall`
+/// 没有别的内容，但 window 级是"点到哪都拦"，不依赖命中测试。
+function blockContextMenu(e: Event) {
+  e.preventDefault();
+}
+
 onMounted(async () => {
   // **页面根背景必须是黑的。**
   // `styles/main.css` 里 `body { background: transparent }`，而 WebView2 的
@@ -678,6 +694,9 @@ onMounted(async () => {
   // 这里在播放页自己把根背景刷黑（只在本窗口生效，主界面不受影响）。
   document.documentElement.style.background = "#000";
   document.body.style.background = "#000";
+
+  // 右键一律吞掉（见 blockContextMenu）
+  window.addEventListener("contextmenu", blockContextMenu);
 
   hintTimer = window.setTimeout(() => (hintVisible.value = false), 3000);
   try {
@@ -713,6 +732,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener("contextmenu", blockContextMenu);
   if (hintTimer) window.clearTimeout(hintTimer);
   stopLoop();
   unlisten?.();
