@@ -7,13 +7,16 @@ import { useWallpaperStore } from "../stores/wallpaper";
 
 const store = useWallpaperStore();
 
-// 在线源（必应 / Pixabay 图片 / Pixabay 视频）且尚未下载时，才提供"只下载、不改桌面"这一项
-// （已下载的再点只是白跑一趟；要操作就去「本地」选项卡）
+// 在线源（必应 / Pixabay 图片 / Pixabay 视频 / Wallhaven）且尚未下载时，
+// 才提供"只下载、不改桌面"这一项（已下载的再点只是白跑一趟；要操作就去「本地」选项卡）
 const canDownloadOnline = computed(() => {
   const it = store.ctxItem;
   if (!it) return false;
   if (it.kind === "pixabay" || it.kind === "pixabay-video") {
     return !store.isPixabayDownloaded(it);
+  }
+  if (it.kind === "wallhaven") {
+    return !store.isWallhavenDownloaded(it);
   }
   return it.kind === "bing" && !store.isBingDownloaded(it);
 });
@@ -57,13 +60,14 @@ function onAction(action: string) {
         </button>
 
         <!-- 收藏 / 取消收藏：书签标记，不删文件（本地/系统壁纸通用）；
-             在线源（必应 / Pixabay 图片 / Pixabay 视频）是远程 URL，
+             在线源（必应 / Pixabay 图片 / Pixabay 视频 / Wallhaven）是远程 URL，
              收藏夹书签体系不适用，不显示该入口 -->
         <button
           v-if="
             store.ctxItem?.kind !== 'bing' &&
             store.ctxItem?.kind !== 'pixabay' &&
-            store.ctxItem?.kind !== 'pixabay-video'
+            store.ctxItem?.kind !== 'pixabay-video' &&
+            store.ctxItem?.kind !== 'wallhaven'
           "
           class="cm-item flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px] text-tx transition-colors hover:bg-white/10"
           @click="onAction('toggle-favorite')"

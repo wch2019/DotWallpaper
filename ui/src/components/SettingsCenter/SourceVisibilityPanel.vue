@@ -2,11 +2,11 @@
 // 壁纸来源显示 — 控制左侧选项卡的展示/隐藏与排列顺序（本地默认强制开启）
 import { ref } from "vue";
 import { NIcon, NInput, NSelect, NSwitch } from "naive-ui";
-import { Eye, Film, FolderHeart, Globe, GripVertical, KeyRound, Layers, Monitor, Sparkles } from "lucide-vue-next";
+import { Eye, Film, FolderHeart, Globe, GripVertical, Image as ImageIcon, KeyRound, Layers, Monitor, Network, Sparkles } from "lucide-vue-next";
 import { toast } from "@/lib/naive-host";
 import { useWallpaperStore } from "@/stores/wallpaper";
 import type { WallpaperSource } from "@/stores/wallpaper";
-import { PIXABAY_VIDEO_QUALITIES } from "@/stores/wallpaper";
+import { PIXABAY_VIDEO_QUALITIES, WALLHAVEN_DEFAULT_API_BASE } from "@/stores/wallpaper";
 import type { PixabayVideoQuality } from "@/stores/wallpaper";
 
 const store = useWallpaperStore();
@@ -40,6 +40,13 @@ const sourceRows = [
     label: "Pixabay 图库",
     desc: "展示 Pixabay 在线图库（需自填 API key，设为桌面时自动下载）",
     icon: Sparkles,
+    locked: false,
+  },
+  {
+    key: "wallhaven",
+    label: "Wallhaven 图库",
+    desc: "展示 Wallhaven 在线壁纸（免 API key，仅 SFW；设为桌面时自动下载）",
+    icon: ImageIcon,
     locked: false,
   },
   {
@@ -147,6 +154,49 @@ function clearPixabayKey() {
   if (store.source === "pixabay") void store.reloadPixabay();
   toast("已清除 Pixabay API key", "success");
 }
+
+// ---- Wallhaven 网络设置 ----
+// 官方没有中国节点，国内访问时通时不通。这里**只提供入口**：
+// 留空走官方，想用自建反代 / 加速地址的人自己填。
+// 刻意**不内置任何第三方镜像** —— 那些镜像无授权、可能篡改图片内容、随时会失效，
+// 写进产品等于给自己埋一颗定时炸弹（而且应用是直接渲染远程图的）。
+//
+// 两个地址必须分开：反代常常只接管了 `/api/`，缩略图仍指向 `th.wallhaven.cc`，
+// 于是"列表拉到了、缩略图全灰"——这时要填的是**图片地址**，不是接口地址。
+const apiBaseInput = ref(store.wallhavenApiBase);
+const imageBaseInput = ref(store.wallhavenImageBase);
+
+function saveWallhavenNet() {
+  const api = apiBaseInput.value.trim();
+  const img = imageBaseInput.value.trim();
+  if (api && !/^https?:\/\//i.test(api)) {
+    toast("接口地址要以 http:// 或 https:// 开头", "warning");
+    return;
+  }
+  if (img && !/^https?:\/\//i.test(img)) {
+    toast("图片地址要以 http:// 或 https:// 开头", "warning");
+    return;
+  }
+  const changed =
+    api !== store.wallhavenApiBase || img !== store.wallhavenImageBase;
+  store.setWallhavenApiBase(api);
+  store.setWallhavenImageBase(img);
+  apiBaseInput.value = api;
+  imageBaseInput.value = img;
+  // 两个地址一起保存，所以列表只在这里刷一次（setter 本身不刷）
+  if (changed && store.source === "wallhaven") void store.reloadWallhaven();
+  toast(api || img ? "已保存，正在用新地址重新加载…" : "已恢复官方地址", "success");
+}
+
+function clearWallhavenNet() {
+  const had = !!(store.wallhavenApiBase || store.wallhavenImageBase);
+  store.setWallhavenApiBase("");
+  store.setWallhavenImageBase("");
+  apiBaseInput.value = "";
+  imageBaseInput.value = "";
+  if (had && store.source === "wallhaven") void store.reloadWallhaven();
+  toast("已恢复官方地址", "success");
+}
 </script>
 
 <template>
@@ -212,7 +262,7 @@ function clearPixabayKey() {
 
     <div class="src-note mt-4 flex items-center gap-2">
       <NIcon :component="Layers" :size="13" class="note-icon shrink-0" />
-      <span>本地壁纸是应用主源，始终展示。「系统 / 必应 / Pixabay」默认关闭，打开开关后对应选项卡才会出现在左侧；关掉只是隐藏选项卡，已下载的数据不会删除。按住左侧手柄上下拖动可调整选项卡的展示顺序，自动保存</span>
+      <span>本地壁纸是应用主源，始终展示。「系统 / 必应 / Pixabay / Wallhaven」默认关闭，打开开关后对应选项卡才会出现在左侧；关掉只是隐藏选项卡，已下载的数据不会删除。按住左侧手柄上下拖动可调整选项卡的展示顺序，自动保存</span>
     </div>
 
     <!-- Pixabay API key：**唯一**能修改/清除已保存 key 的地方。
@@ -264,6 +314,61 @@ function clearPixabayKey() {
           @update:value="(v: string) => store.setPixabayVideoQuality(v as PixabayVideoQuality)"
         />
       </div>
+    </div>
+
+    <!-- Wallhaven 网络：官方没有中国节点，国内访问时通时不通。
+         这里只是**入口**，不内置镜像 —— 第三方镜像无授权、可能篡改图片、随时会死。
+         接口与图片两个地址分开填：反代只接管 /api/ 时，列表能拉、缩略图全灰。 -->
+    <div class="wallhaven-net mt-3 rounded-lg bg-panel-2 px-3 py-3">
+      <div class="flex items-center gap-2">
+        <NIcon :component="Network" :size="14" class="shrink-0 text-accent" />
+        <span class="text-[12.5px] font-medium text-tx">Wallhaven 网络</span>
+        <span
+          class="ml-auto text-[11px]"
+          :class="store.wallhavenApiBase || store.wallhavenImageBase ? 'text-accent' : 'text-faint'"
+        >
+          {{ store.wallhavenApiBase || store.wallhavenImageBase ? "自定义" : "官方" }}
+        </span>
+      </div>
+      <p class="mt-1.5 text-[11px] leading-relaxed text-faint">
+        官方服务器不在国内，访问时通时不通。若你有自建的反向代理或可用的加速地址，填在这里；留空则直连官方。地址只保存在本机。
+      </p>
+
+      <div class="mt-2 flex items-center gap-1.5">
+        <span class="w-[52px] shrink-0 text-[11.5px] text-dim">接口</span>
+        <NInput
+          v-model:value="apiBaseInput"
+          size="small"
+          :placeholder="WALLHAVEN_DEFAULT_API_BASE"
+          @keyup.enter="saveWallhavenNet"
+        />
+      </div>
+      <div class="mt-1.5 flex items-center gap-1.5">
+        <span class="w-[52px] shrink-0 text-[11.5px] text-dim">图片</span>
+        <NInput
+          v-model:value="imageBaseInput"
+          size="small"
+          placeholder="留空 = 官方 CDN（th. / w. wallhaven.cc）"
+          @keyup.enter="saveWallhavenNet"
+        />
+      </div>
+
+      <div class="mt-2 flex items-center gap-1.5">
+        <button class="key-btn key-btn-primary" @click="saveWallhavenNet">保存</button>
+        <button
+          v-if="store.wallhavenApiBase || store.wallhavenImageBase"
+          class="key-btn"
+          @click="clearWallhavenNet"
+        >
+          恢复官方
+        </button>
+      </div>
+
+      <p class="mt-1.5 text-[10.5px] leading-relaxed text-faint">
+        列表能出来但缩略图全灰 = 反代只接管了接口、没接管图片。把图片地址填上，反代需覆盖
+        <code>/lg/</code>、<code>/orig/</code>、<code>/small/</code>、<code>/full/</code> 这几段路径（路径原样保留）。
+        不建议填第三方镜像站：它们无授权、可能篡改图片，且随时会失效。
+      </p>
     </div>
   </div>
 </template>

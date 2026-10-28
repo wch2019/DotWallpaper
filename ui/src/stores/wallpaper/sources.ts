@@ -12,11 +12,11 @@ import {
 export function useSourceState() {
   // 各来源选项卡的可见性。
   //
-  // **默认只开「本地 + 收藏」**：system / bing / pixabay 一律默认关闭，
-  // 由用户自己在「设置 → 壁纸来源」里打开。
-  // 理由：这三个来源都不是"装好就能用"的 —— 系统壁纸是只读的固定几张，
-  // 必应要联网拉图，Pixabay 还得先填 API key。默认全展开会让新用户第一眼
-  // 看到一堆空列表/加载失败，以为应用坏了。
+  // **默认只开「本地 + 收藏」**：system / bing / pixabay / wallhaven 一律默认关闭，
+  // 由用户自己在「设置 → 壁纸来源」或页签条末尾的「＋ 添加来源」里打开。
+  // 理由：这些来源都不是"装好就能用"的 —— 系统壁纸是只读的固定几张，
+  // 必应要联网拉图，Pixabay 还得先填 API key，Wallhaven 是第三方站点。
+  // 默认全展开会让新用户第一眼看到一堆空列表/加载失败，以为应用坏了。
   //
   // local 恒为 true 且不可关闭（应用主源）。
   const sourceVisibility = ref<SourceVisibility>({
@@ -25,6 +25,7 @@ export function useSourceState() {
     favorites: true,
     bing: false,
     pixabay: false,
+    wallhaven: false,
   });
 
   /// 读取持久化的可见性。
@@ -41,6 +42,7 @@ export function useSourceState() {
         sourceVisibility.value.favorites = parsed.favorites ?? true;
         sourceVisibility.value.bing = parsed.bing ?? false;
         sourceVisibility.value.pixabay = parsed.pixabay ?? false;
+        sourceVisibility.value.wallhaven = parsed.wallhaven ?? false;
       }
     } catch { /* ignore */ }
   }
@@ -52,13 +54,14 @@ export function useSourceState() {
         favorites: sourceVisibility.value.favorites,
         bing: sourceVisibility.value.bing,
         pixabay: sourceVisibility.value.pixabay,
+        wallhaven: sourceVisibility.value.wallhaven,
       }));
     } catch { /* ignore */ }
   }
 
   // 仅更新可见性并持久化；"隐藏当前选项卡时自动切回本地"的联动由主 store 的 setSourceVisibility 处理
   function updateSourceVisibility(
-    key: "system" | "favorites" | "bing" | "pixabay",
+    key: "system" | "favorites" | "bing" | "pixabay" | "wallhaven",
     visible: boolean
   ) {
     sourceVisibility.value[key] = visible;
@@ -80,7 +83,8 @@ export function useSourceState() {
           s === "system" ||
           s === "favorites" ||
           s === "bing" ||
-          s === "pixabay"
+          s === "pixabay" ||
+          s === "wallhaven"
       );
       // 去重并补全缺失来源，保证数组恰好包含全部来源
       const seen = new Set<WallpaperSource>(list);

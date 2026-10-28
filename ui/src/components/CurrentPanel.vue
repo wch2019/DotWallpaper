@@ -1120,13 +1120,14 @@ onUnmounted(() => {
           <span class="shrink-0 text-faint">预览</span>
           <span class="min-w-0 truncate text-tx" :title="previewName + '（当前选中，仅预览）'">{{ previewName || "—" }}</span>
           <!-- 收藏状态：星标展示 + 快捷收藏/取消收藏
-               （必应 / Pixabay 图片 / Pixabay 视频都是在线项，不参与收藏夹书签体系） -->
+               （必应 / Pixabay 图片 / Pixabay 视频 / Wallhaven 都是在线项，不参与收藏夹书签体系） -->
           <button
             v-if="
               previewTarget?.path &&
               previewTarget?.kind !== 'bing' &&
               previewTarget?.kind !== 'pixabay' &&
-              previewTarget?.kind !== 'pixabay-video'
+              previewTarget?.kind !== 'pixabay-video' &&
+              previewTarget?.kind !== 'wallhaven'
             "
             class="flex shrink-0 cursor-pointer items-center rounded p-0.5 transition-colors hover:bg-white/10"
             :title="previewIsFav ? '已收藏，点击取消收藏' : '收藏该壁纸 (Ctrl+F)'"

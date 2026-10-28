@@ -47,8 +47,8 @@ async function onRestoreDefault() {
 }
 
 // ---- 在线源下载目录（只读派生） ----
-// 路径不在前端拼：`<壁纸目录>\BingWallpaper` / `<壁纸目录>\Pixabay` 这两条规则
-// 只在 Rust 侧各存在一份，这里只负责展示后端给的最终路径。
+// 路径不在前端拼：`<壁纸目录>\BingWallpaper` / `<壁纸目录>\Pixabay` /
+// `<壁纸目录>\Wallhaven` 这几条规则只在 Rust 侧各存在一份，这里只负责展示后端给的最终路径。
 // 遗留目录（老版本可单独配置）只提示不搬移。
 const openingLegacy = ref(false);
 
@@ -68,11 +68,18 @@ const onlineDirs = computed(() => [
     // 用户来这一栏就是确认"文件落在哪、叫什么"，两条规则都要写全。
     pattern: "文件名：Pixabay_图片id.jpg · PixabayVideo_视频id.mp4",
   },
+  {
+    key: "wallhaven",
+    path: store.wallhavenDirInfo?.dir || "",
+    // id 是 6 位字母数字；扩展名随原图（jpg / png / webp）
+    pattern: "文件名：Wallhaven_图片id.jpg",
+  },
 ]);
 
 function refreshOnlineDirs() {
   void store.refreshBingDirInfo();
   void store.refreshPixabayDirInfo();
+  void store.refreshWallhavenDirInfo();
 }
 
 async function onOpenLegacyDir() {
@@ -141,7 +148,7 @@ watch(() => store.currentDir, refreshOnlineDirs);
          本来就差 45px 放不下，删掉后在线壁纸目录那段才能完整露出。
          真正需要保留的是底部那条「只浏览不落盘」—— 那是隐私承诺，不是废话。 -->
 
-    <!-- 在线壁纸目录（两个来源都是**只读派生**，规则只在 Rust 侧存在一份） -->
+    <!-- 在线壁纸目录（各来源都是**只读派生**，规则只在 Rust 侧存在一份） -->
     <div class="panel-header pt-5">
       <NIcon :component="DownloadCloud" :size="18" class="panel-icon text-accent" />
       <div class="panel-title">在线壁纸目录</div>
@@ -151,7 +158,7 @@ watch(() => store.currentDir, refreshOnlineDirs);
     <div class="dir-card">
       <!-- 不再写「下载目录」这个小标签：上面的标题已经说了"在线壁纸目录"，
            重复一次白占 20px，而面板在 640 高的窗口里本来就紧。 -->
-      <!-- 每个在线源一行。以后再加第三个源，往 onlineDirs 里加一项即可，
+      <!-- 每个在线源一行。以后再加源，往 onlineDirs 里加一项即可，
            不用再复制一段卡片模板。 -->
       <div
         v-for="d in onlineDirs"

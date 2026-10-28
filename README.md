@@ -13,7 +13,7 @@
 - **壁纸样式**：支持设置桌面壁纸样式（填充 / 适应 / 拉伸 / 居中 / 平铺），实时读取当前系统样式
 - **壁纸收藏**：右键菜单或卡片星标收藏 / 取消收藏，独立"收藏"选项卡集中展示，书签持久化到 localStorage（快捷键 Ctrl+F）
 - **系统壁纸**：独立"系统"选项卡只读浏览 Windows 自带壁纸目录
-- **在线图库**：两个在线来源 —— **必应**每日壁纸（可向前翻阅至 2016 年的社区归档，滚动加载）与 **Pixabay** 搜索式图库（关键词 / 分类 / 热门·最新排序，服务端分页）。在线图支持"只下载、不换桌面"，下载后归「本地」选项卡管理；Pixabay 需自填 API key（免费注册，只存本机，不填不影响其它来源），免费 key 只返回 1280px 时按字段自动降级并在界面说明
+- **在线图库**：三个在线来源 —— **必应**每日壁纸（可向前翻阅至 2016 年的社区归档，滚动加载）、**Pixabay** 搜索式图库（关键词 / 分类 / 热门·最新排序，服务端分页）与 **Wallhaven** 搜索式图库（分类 / 分辨率 / 比例 / 颜色筛选，免 API key，只请求公开 SFW 内容）。在线图支持"只下载、不换桌面"，下载后归「本地」选项卡管理；Pixabay 需自填 API key（免费注册，只存本机，不填不影响其它来源），免费 key 只返回 1280px 时按字段自动降级并在界面说明。三个在线来源默认关闭，在「设置 → 壁纸来源」或页签条末尾的「＋」里自行开启
 - **在线视频壁纸**：Pixabay 同一选项卡内可切到「视频」，点卡片直接在右栏播放预览，点「下载并设为动态壁纸」才下载到本地并铺到桌面。清晰度可在设置里选 1080p / 4K（素材没有 4K 时自动降级并在预览角标如实标注），卡片角标显示时长、预览角标显示档位与体积
 - **右键管理**：右键菜单支持设为桌面壁纸、收藏 / 取消收藏、在资源管理器中显示、移入回收站（可还原）
 - **拖入导入**：将本地图片拖入应用窗口，自动复制保存到壁纸目录（支持 JPG/JPEG/PNG/BMP/WebP），Ctrl+I 可唤出拖放遮罩
@@ -59,7 +59,7 @@ DotWallpaper/
 │   │   │   └── updater.ts          # 更新 API 封装 + isStoreBuild 商店构建判断
 │   │   └── components/
 │   │       ├── TitleBar.vue        # 自定义标题栏（含更新角标与设置入口）
-│   │       ├── Sidebar.vue         # 左栏壁纸网格（本地 / 系统 / 收藏 / 必应 / Pixabay 选项卡，视频首帧抓取）
+│   │       ├── Sidebar.vue         # 左栏壁纸网格（本地 / 系统 / 收藏 / 必应 / Pixabay / Wallhaven 选项卡，视频首帧抓取）
 │   │       ├── CurrentPanel.vue    # 右栏预览（图片 / 视频）与样式、效果设置
 │   │       ├── VideoWallpaper.vue  # 动态壁纸播放页（置底窗口以 ?view=video 加载）
 │   │       ├── ContextMenu.vue     # 右键菜单
@@ -70,7 +70,7 @@ DotWallpaper/
 │   │           ├── SettingsCenter.vue       # 设置中心主入口（导航 + 子面板）
 │   │           ├── SettingHeader.vue        # 设置中心头部框架
 │   │           ├── DirectoryPanel.vue       # 壁纸目录
-│   │           ├── SourceVisibilityPanel.vue # 壁纸来源（本地/系统/收藏/必应/Pixabay 显隐与排序、Pixabay key）
+│   │           ├── SourceVisibilityPanel.vue # 壁纸来源（本地/系统/收藏/必应/Pixabay/Wallhaven 显隐与排序、Pixabay key）
 │   │           ├── EffectPanel.vue          # 壁纸效果（模糊 / 遮罩）
 │   │           ├── TrayPanel.vue            # 后台运行（关闭窗口行为）
 │   │           ├── ShortcutsPanel.vue       # 快捷键说明
@@ -86,6 +86,7 @@ DotWallpaper/
 │   │   ├── thumbs.rs               # 缩略图缓存与后台渐进生成
 │   │   ├── bing.rs                 # 必应每日壁纸列表与下载
 │   │   ├── pixabay.rs              # Pixabay 在线图库：图片/视频搜索、分辨率与清晰度降级、下载与缓存
+│   │   ├── wallhaven.rs            # Wallhaven 在线图库：搜索/筛选、随机 seed 分页、下载与缓存（仅 SFW）
 │   │   └── http.rs                 # 共享 HTTP 客户端（超时 / UA / 统一错误文案）
 │   ├── Assets/                     # MSIX 商店资源（AppList/StoreLogo/WideTile/MedTile 多缩放）
 │   ├── icons/                      # 应用图标
@@ -173,6 +174,9 @@ Rust 后端暴露的 Tauri 命令（见 `src-tauri/src/main.rs`）：
 | `download_pixabay_video` | 下载 Pixabay 视频到 `<壁纸目录>\Pixabay`（`PixabayVideo_<id>.mp4`，流式写入），返回本地路径 |
 | `list_downloaded_pixabay_wallpapers` | 扫描本地壁纸目录中已下载的 Pixabay 图片（用于「已下载」徽标） |
 | `list_downloaded_pixabay_videos` | 扫描本地壁纸目录中已下载的 Pixabay 视频（视频徽标独立一份） |
+| `list_wallhaven_wallpapers` | 拉取 Wallhaven 搜索结果（免 API key，仅 SFW，响应缓存 10min；随机排序回传 seed） |
+| `download_wallhaven_wallpaper` | 下载 Wallhaven 图片到 `<壁纸目录>\Wallhaven`（`Wallhaven_<id>.<ext>`），返回本地路径 |
+| `list_downloaded_wallhaven_wallpapers` | 扫描本地壁纸目录中已下载的 Wallhaven 图片（用于「已下载」徽标） |
 | `pick_wallpaper_directory` | 弹出目录选择框 |
 | `pick_bing_wallpaper_directory` | 弹出必应壁纸下载目录选择框 |
 | `reveal_in_explorer` | 在资源管理器中显示指定文件 |
@@ -190,7 +194,7 @@ Rust 后端暴露的 Tauri 命令（见 `src-tauri/src/main.rs`）：
 ## 使用方式
 
 1. **查看当前壁纸**：启动后右侧展示当前桌面壁纸，可切换壁纸样式
-2. **浏览壁纸**：左侧网格按来源选项卡展示（本地 / 系统 / 收藏 / 必应 / Pixabay），滚动加载更多。Pixabay 需先在「设置 → 壁纸来源」里填入自己的 API key（免费注册，只存本机），不填不影响其它来源
+2. **浏览壁纸**：左侧网格按来源选项卡展示（本地 / 系统 / 收藏 / 必应 / Pixabay / Wallhaven），滚动加载更多。Pixabay 需先在「设置 → 壁纸来源」里填入自己的 API key（免费注册，只存本机），不填不影响其它来源；Wallhaven 免 key，默认关闭，开启后只显示公开 SFW 内容
 3. **设置壁纸**：点击壁纸卡片预览，点击"设为壁纸"应用到桌面
 4. **动态壁纸**：壁纸目录里的 mp4 / webm 视频会作为视频卡片出现在"本地"列表，右上角带"视频"角标；点选后右侧实时循环预览，点击"设为动态壁纸"（或双击卡片）即挂到桌面播放。停止可在右侧"停止动态壁纸"按钮，或在桌面上双击。mkv / mov 会标记为"不兼容"（WebView 无法解码），需先转成 mp4。全屏游戏、笔记本拔电源或锁屏时自动冻结画面，条件解除后自动恢复（此时暂停按钮为禁用态并提示原因）
 5. **收藏壁纸**：点击卡片右上角星标或右键 → 收藏，可在"收藏"选项卡集中浏览（Ctrl+F 收藏当前预览壁纸）

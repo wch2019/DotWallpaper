@@ -42,9 +42,10 @@ const PIXABAY_LICENSE_URL = "https://pixabay.com/service/license-summary/";
 /// attribute the author"），可免费用 / 可改 / 无需署名，但不得以独立文件形式再分发。
 /// 真正要求"标明来源"的是 API Terms，不是许可本身 —— 别混着写。
 const LICENSE_FULL_TEXT =
-  "在线图片分别来自必应每日壁纸与 Pixabay。Pixabay 图片遵循 Content License：" +
-  "可免费使用与修改、无需署名，但不得以原图形式单独再分发。" +
-  "卡片上仍会显示作者，方便你回到原图页面；在线图片只在你设为桌面壁纸时下载到本地，不做永久外链。";
+  "在线图片分别来自必应每日壁纸、Pixabay 与 Wallhaven。" +
+  "Pixabay 图片遵循 Content License：可免费使用与修改、无需署名，但不得以原图形式单独再分发。" +
+  "Wallhaven 图片由用户上传，本应用只请求其公开的 SFW 内容，且只在设为桌面壁纸时单张下载。" +
+  "在线图片只在你设为桌面壁纸时下载到本地，不做永久外链。";
 
 function openGitHub() {
   openUrl(GITHUB_URL);
@@ -115,7 +116,7 @@ function openLicUrl(url: string) {
         <div class="min-w-0 flex-1">
           <div class="text-[12px] font-medium text-tx">图片来源与许可</div>
           <p class="mt-0.5 text-[11px] text-faint">
-            在线图片来自必应与 Pixabay · 查看 Content License
+            在线图片来自必应、Pixabay 与 Wallhaven · 查看 Pixabay Content License
           </p>
         </div>
         <ArrowRight :size="14" class="shrink-0 text-faint" />

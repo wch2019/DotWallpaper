@@ -5,7 +5,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import type { Component } from "vue";
 import { NIcon, NInput, NSelect } from "naive-ui";
-import { AlertTriangle, Check, Download, Globe, Layers, Monitor, Play, Plus, Search, SlidersHorizontal, Sparkles, Star } from "lucide-vue-next";
+import { AlertTriangle, Check, Download, Globe, Image as ImageIcon, Layers, Monitor, Play, Plus, Search, SlidersHorizontal, Sparkles, Star } from "lucide-vue-next";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import defaultJpg from '../assets/images/default.jpg'
 import { toast } from "../lib/naive-host";
@@ -21,6 +21,11 @@ import {
   PIXABAY_SIZES,
   PIXABAY_COLORS,
   PIXABAY_VIDEO_TYPES,
+  WALLHAVEN_CATEGORIES,
+  WALLHAVEN_SORTS,
+  WALLHAVEN_ATLEASTS,
+  WALLHAVEN_RATIOS,
+  WALLHAVEN_COLORS,
   type WallpaperItem,
   type WallpaperSource,
   type LocalFilter,
@@ -29,6 +34,10 @@ import {
   type PixabayOrientation,
   type PixabaySize,
   type PixabayVideoType,
+  type WallhavenCategory,
+  type WallhavenSort,
+  type WallhavenAtleast,
+  type WallhavenRatio,
 } from "../stores/wallpaper";
 
 const store = useWallpaperStore();
@@ -63,6 +72,12 @@ const ORIENTATION_OPTIONS = PIXABAY_ORIENTATIONS.map((o) => ({ label: o.label, v
 const SIZE_OPTIONS = PIXABAY_SIZES.map((o) => ({ label: o.label, value: o.value }));
 const VIDEO_TYPE_OPTIONS = PIXABAY_VIDEO_TYPES.map((o) => ({ label: o.label, value: o.value }));
 
+// Wallhaven 下拉选项（同样转成 NSelect 需要的可变数组）
+const WALLHAVEN_CATEGORY_OPTIONS = WALLHAVEN_CATEGORIES.map((o) => ({ label: o.label, value: o.value }));
+const WALLHAVEN_SORT_OPTIONS = WALLHAVEN_SORTS.map((o) => ({ label: o.label, value: o.value }));
+const WALLHAVEN_ATLEAST_OPTIONS = WALLHAVEN_ATLEASTS.map((o) => ({ label: o.label, value: o.value }));
+const WALLHAVEN_RATIO_OPTIONS = WALLHAVEN_RATIOS.map((o) => ({ label: o.label, value: o.value }));
+
 // 各来源选项卡元信息：图标与文案（渲染顺序由 store.sourceOrder 决定）
 //
 // `menuLabel` 只给「添加来源」浮层用：页签里「系统」「必应」够用（有上下文），
@@ -76,6 +91,7 @@ const sourceTabMeta: Record<
   favorites: { label: "收藏", icon: Star },
   bing: { label: "必应", icon: Globe, menuLabel: "必应壁纸" },
   pixabay: { label: "Pixabay", icon: Sparkles, menuLabel: "Pixabay 图库" },
+  wallhaven: { label: "Wallhaven", icon: ImageIcon, menuLabel: "Wallhaven 图库" },
 };
 
 // 按用户配置顺序 + 可见性过滤后实际渲染的选项卡列表
@@ -257,6 +273,28 @@ const pixabayFilterSummary = computed(() => {
   return parts.join(" · ");
 });
 
+/// Wallhaven 的筛选摘要（与 Pixabay 同一套理由：面板一关就看不见筛了什么）。
+const wallhavenFilterSummary = computed(() => {
+  const parts: string[] = [];
+  if (store.wallhavenCategory !== "111") {
+    const c = WALLHAVEN_CATEGORIES.find((x) => x.value === store.wallhavenCategory);
+    if (c) parts.push(c.label);
+  }
+  if (store.wallhavenAtleast) {
+    const s = WALLHAVEN_ATLEASTS.find((x) => x.value === store.wallhavenAtleast);
+    if (s) parts.push(s.label);
+  }
+  if (store.wallhavenRatio) {
+    const r = WALLHAVEN_RATIOS.find((x) => x.value === store.wallhavenRatio);
+    if (r) parts.push(r.label);
+  }
+  if (store.wallhavenColor) {
+    const c = WALLHAVEN_COLORS.find((x) => x.value === store.wallhavenColor);
+    if (c) parts.push(c.label);
+  }
+  return parts.join(" · ");
+});
+
 const dirHint = computed(() => {
   if (store.source === "system") {
     return "系统壁纸：C:\\Windows\\Web\\Wallpaper（只读）";
@@ -280,6 +318,12 @@ const dirHint = computed(() => {
     return store.pixabayDegraded
       ? "Pixabay：免费 key 仅 1280px，申请 full access 后自动升级为原图"
       : "Pixabay 在线图库：设为桌面时自动下载到本地";
+  }
+  if (store.source === "wallhaven") {
+    if (wallhavenFilterSummary.value) {
+      return `Wallhaven 筛选：${wallhavenFilterSummary.value}`;
+    }
+    return "Wallhaven 在线图库：设为桌面时自动下载到本地（仅 SFW）";
   }
   return store.currentDir ? "壁纸目录：" + store.currentDir : "壁纸目录：默认（图片）";
 });
@@ -620,6 +664,18 @@ function onPixabayQueryInput(v: string) {
   }, 400);
 }
 
+// Wallhaven 同样要防抖：未认证限流 45 次/分钟，逐字发请求几秒就能打满。
+// 400ms 与 Pixabay 一致 —— 同一个应用里两处搜索的节奏不该不一样。
+let wallhavenQueryTimer: number | null = null;
+function onWallhavenQueryInput(v: string) {
+  const next = v ?? "";
+  if (wallhavenQueryTimer !== null) window.clearTimeout(wallhavenQueryTimer);
+  wallhavenQueryTimer = window.setTimeout(() => {
+    wallhavenQueryTimer = null;
+    void store.setWallhavenQuery(next);
+  }, 400);
+}
+
 // 在线源（必应 / Pixabay）的下载按钮与「已下载」徽标结构相同、只有落点不同，
 // 故模板共用一套，由这里按 kind 分派 —— 避免在模板里堆三元表达式。
 /// 在线卡片是否正在下载。图片与视频共用 `pixabayDownloadingId` 这一个槽位
@@ -628,6 +684,9 @@ function isOnlineDownloading(item: WallpaperItem): boolean {
   if (item.kind === "pixabay" || item.kind === "pixabay-video") {
     return !!item.onlineId && store.pixabayDownloadingId === item.onlineId;
   }
+  if (item.kind === "wallhaven") {
+    return !!item.onlineId && store.wallhavenDownloadingId === item.onlineId;
+  }
   return !!item.date && store.bingDownloadingDate === item.date;
 }
 
@@ -635,12 +694,17 @@ function isOnlineDownloaded(item: WallpaperItem): boolean {
   if (item.kind === "pixabay" || item.kind === "pixabay-video") {
     return store.isPixabayDownloaded(item);
   }
+  if (item.kind === "wallhaven") {
+    return store.isWallhavenDownloaded(item);
+  }
   return store.isBingDownloaded(item);
 }
 
 function onDownloadOnline(item: WallpaperItem) {
   if (item.kind === "pixabay" || item.kind === "pixabay-video") {
     void store.downloadPixabayWallpaper(item);
+  } else if (item.kind === "wallhaven") {
+    void store.downloadWallhavenWallpaper(item);
   } else {
     void store.downloadBingWallpaper(item);
   }
@@ -649,6 +713,8 @@ function onDownloadOnline(item: WallpaperItem) {
 function onOpenDownloaded(item: WallpaperItem) {
   if (item.kind === "pixabay" || item.kind === "pixabay-video") {
     void store.openInLocalPixabay(item);
+  } else if (item.kind === "wallhaven") {
+    void store.openInLocalWallhaven(item);
   } else {
     void store.openInLocal(item);
   }
@@ -805,6 +871,19 @@ watch(
   }
 );
 
+// Wallhaven 工具条显隐：元素被销毁重建，筛选栏高度与 ResizeObserver 的目标
+// 都要重算 —— 否则加载遮罩的 top 会沿用上一条工具条的高度（两条高度接近，
+// 但别赌，一像素的偏移就会让遮罩盖住/漏出工具条边缘）。
+watch(
+  () => store.showWallhavenTools,
+  async () => {
+    await nextTick();
+    filterRo?.disconnect();
+    syncFilterBarHeight();
+    if (filterBar.value) filterRo?.observe(filterBar.value);
+  }
+);
+
 // 图片 ⇄ 视频：滑块平移。等 DOM 更新后再测（切换会连带重载列表）
 watch(mediaActiveIndex, async () => {
   await nextTick();
@@ -863,16 +942,18 @@ function onThumbLoad(e: Event) {
            **实测宽度**（headless Chrome 800×480、12px 字、Windows 默认字体）：
              本地/收藏/系统/必应 = 56 each → 224
              Pixabay            = 74
-             4 个 gap-1.5(6px)  = 24   ⇒ 标签条合计 322
+             Wallhaven          = 92（拉丁字母最长的一个）
+             5 个 gap-1.5(6px)  = 30   ⇒ 标签条合计 420
              右侧计数 "12/12"    = 24.5
              两处 flex gap-2     = 16
-             合计 ≈ 363 / 容器 396px，余量 33px。
-           ⚠️ 再加第 6 个来源（≈+62）就会溢出 —— 溢出时标签条会顶出去、计数被挤掉，
-           不会报错。真加之前先重新量。
-           末尾那个「＋ 添加来源」约 21px + gap 6 = 27px，正好卡在 33px 余量内；
-           **而且它只在还有来源被隐藏时渲染**，5 个全开时它自己消失 ——
-           所以这个入口不会把标签条顶破。 -->
-      <div class="source-tabs flex min-w-0 items-center gap-1.5">
+             合计 ≈ 460 / 容器 396px —— **6 个页签全开时必然放不下**。
+
+           ⇒ 所以 `.source-tabs` 必须 `flex-wrap`：放不下就换行，而不是把标签条
+           顶出去、把右侧计数挤没（后者不会报错，只是"计数莫名其妙消失"）。
+           换行只发生在用户把 6 个来源全打开时；默认 2 个页签时没有任何变化。
+           末尾那个「＋ 添加来源」约 21px + gap 6 = 27px，它只在还有来源被隐藏时
+           渲染，全开时自己消失，所以不会额外占一行。 -->
+      <div class="source-tabs flex min-w-0 flex-wrap items-center gap-1.5">
         <button
           v-for="tab in visibleSourceTabs"
           :key="tab.key"
@@ -1075,12 +1156,53 @@ function onThumbLoad(e: Event) {
         </button>
       </div>
 
+      <!-- Wallhaven 工具条：搜索框 + 筛选。
+           **没有媒体分段** —— Wallhaven 只有图片，摆一个"图片/视频"切换等于说谎。
+           宽度预算：左栏可用 ≈394px，去掉内边距 24 + 筛选按钮 54 + gap 4
+           ⇒ 搜索框 flex-1 拿到约 312px，比 Pixabay 那条宽松（它还要塞分段与分类）。 -->
+      <div
+        v-else-if="store.showWallhavenTools"
+        ref="filterBar"
+        class="filter-bar flex flex-none items-center gap-1 px-3 py-2"
+      >
+        <NInput
+          :value="store.wallhavenQuery"
+          size="small"
+          class="search-input"
+          placeholder="搜索…（支持 tag:xxx）"
+          clearable
+          @update:value="onWallhavenQueryInput"
+        >
+          <template #prefix>
+            <NIcon :component="Search" :size="13" />
+          </template>
+        </NInput>
+        <button
+          ref="filterBtn"
+          class="filter-btn flex shrink-0 cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-[12px] transition-colors"
+          :class="
+            filterOpen || store.wallhavenFilterCount
+              ? 'bg-accent-soft text-accent'
+              : 'text-dim hover:text-tx'
+          "
+          :title="store.wallhavenFilterCount ? `已启用 ${store.wallhavenFilterCount} 项筛选` : '筛选条件'"
+          @click="toggleFilterPanel"
+        >
+          <NIcon :component="SlidersHorizontal" :size="13" />
+          筛选
+          <span
+            v-if="store.wallhavenFilterCount"
+            class="filter-badge flex items-center justify-center rounded-full"
+          >{{ store.wallhavenFilterCount }}</span>
+        </button>
+      </div>
+
       <!-- 首次加载 loading 层：allCount 已拉取但 gridItems 尚未渲染时展示。
            覆盖范围排除上方本地工具条（工具条是常驻控件，加载中也应保持可用）：
            用 flex 兄弟关系而非硬编码 top 值，工具条高度变化时无需同步修改 -->
       <div
         class="loading-overlay absolute inset-x-0 bottom-0 z-20 flex flex-col items-center justify-center"
-        :style="{ top: store.showLocalTools || store.showPixabayTools ? filterBarHeight + 'px' : '0px' }"
+        :style="{ top: store.showLocalTools || store.showPixabayTools || store.showWallhavenTools ? filterBarHeight + 'px' : '0px' }"
         :class="store.allCount > 0 && !store.gridItems.length && !store.loadingMore ? 'opacity-100' : 'opacity-0 invisible transition-opacity duration-200'"
       >
         <div class="relative h-14 w-14">
@@ -1179,10 +1301,10 @@ function onThumbLoad(e: Event) {
                    的时刻，不该让按钮还藏着。
                    已下载时这个槽位让给左上角的「已下载」徽标，两者互斥不重叠。 -->
               <button
-                v-if="(item.kind === 'bing' || item.kind === 'pixabay') && !isOnlineDownloaded(item)"
+                v-if="(item.kind === 'bing' || item.kind === 'pixabay' || item.kind === 'wallhaven') && !isOnlineDownloaded(item)"
                 class="online-dl absolute right-1.5 top-1.5 z-[6] flex cursor-pointer items-center gap-1 rounded-md border border-white/10 bg-black/45 px-1.5 py-[2px] opacity-0 backdrop-blur-[2px] transition-opacity duration-200 group-hover:opacity-100 hover:border-white/25 hover:bg-black/65"
                 :style="isOnlineDownloading(item) || isSelected(item) ? { opacity: 1 } : undefined"
-                :disabled="!!store.bingDownloadingDate || !!store.pixabayDownloadingId"
+                :disabled="!!store.bingDownloadingDate || !!store.pixabayDownloadingId || !!store.wallhavenDownloadingId"
                 :title="'下载到本地壁纸目录（不会改变桌面）'"
                 @click.stop="onDownloadOnline(item)"
               >
@@ -1256,7 +1378,8 @@ function onThumbLoad(e: Event) {
               v-if="
                 item.kind !== 'bing' &&
                 item.kind !== 'pixabay' &&
-                item.kind !== 'pixabay-video'
+                item.kind !== 'pixabay-video' &&
+                item.kind !== 'wallhaven'
               "
               class="fav-badge absolute right-1.5 top-1.5 z-[6] flex h-[22px] w-[22px] cursor-pointer items-center justify-center rounded-md border border-white/10 bg-black/45 opacity-0 backdrop-blur-[2px] transition-opacity duration-200 group-hover:opacity-100 hover:border-white/25 hover:bg-black/65"
               :style="isFav(item) ? { opacity: 1 } : undefined"
@@ -1359,9 +1482,30 @@ function onThumbLoad(e: Event) {
                                 : store.pixabayFilterCount
                                   ? "当前筛选条件下没有结果：点「筛选」把条件放宽，或直接重置"
                                   : "Pixabay 没有匹配结果：换个关键词试试"
-                              : "此目录下暂无图片或视频，可到设置中更换壁纸目录"
+                              : store.source === "wallhaven"
+                                ? // 连不上 ≠ 没结果：这两种情况在空态里必须分开，
+                                  // 否则用户会一直换关键词，而真正的原因在网络
+                                  store.wallhavenError
+                                  ? store.wallhavenError
+                                  : store.wallhavenFilterCount
+                                    ? "当前筛选条件下没有结果：点「筛选」把条件放宽，或直接重置"
+                                    : "Wallhaven 没有匹配结果：换个关键词试试"
+                                : "此目录下暂无图片或视频，可到设置中更换壁纸目录"
               }}
             </p>
+            <!-- 网络失败时给一个就地重试：用户不该为了再试一次去切页签 -->
+            <div
+              v-if="store.source === 'wallhaven' && store.wallhavenError"
+              class="mt-3"
+            >
+              <button
+                class="cursor-pointer rounded-md border border-accent/40 bg-accent-soft px-3 py-1 text-[11.5px] text-accent transition-colors hover:bg-accent/20 disabled:opacity-50"
+                :disabled="store.wallhavenLoading"
+                @click="store.reloadWallhaven()"
+              >
+                {{ store.wallhavenLoading ? "重试中…" : "重试" }}
+              </button>
+            </div>
           </template>
         </div>
 
@@ -1409,6 +1553,15 @@ function onThumbLoad(e: Event) {
           :options="PIXABAY_ORDER_OPTIONS"
           @update:value="(v: string) => store.setPixabayOrder(v)"
         />
+        <!-- Wallhaven 排序同样挂页脚 -->
+        <NSelect
+          v-else-if="store.showWallhavenTools"
+          :value="store.wallhavenSort"
+          size="tiny"
+          class="sort-select"
+          :options="WALLHAVEN_SORT_OPTIONS"
+          @update:value="(v: WallhavenSort) => store.setWallhavenSort(v)"
+        />
       </div>
     </div>
 
@@ -1419,12 +1572,81 @@ function onThumbLoad(e: Event) {
     <Teleport to="body">
       <Transition name="filter-pop">
         <div
-          v-if="filterOpen && store.showPixabayTools"
+          v-if="filterOpen && (store.showPixabayTools || store.showWallhavenTools)"
           ref="filterPanelEl"
           class="filter-panel app-no-drag fixed z-[88] overflow-y-auto rounded-xl border border-line-2 bg-[rgba(24,31,45,0.97)] p-2.5 shadow-[0_14px_36px_rgba(0,0,0,0.45)] backdrop-blur-xl"
           :style="filterPanelStyle"
           @mousedown.stop
         >
+          <!-- Wallhaven 筛选：分类 / 分辨率 / 比例 / 颜色。
+               全部是接口原生参数（分类是 3 位位掩码，颜色是十六进制），
+               排序不在这里 —— 它挂在页脚，与 Pixabay 同一位置。 -->
+          <template v-if="store.showWallhavenTools">
+            <div class="fp-row">
+              <span class="fp-label">分类</span>
+              <NSelect
+                size="small"
+                class="fp-select"
+                :menu-props="FILTER_MENU_PROPS"
+                :value="store.wallhavenCategory"
+                :options="WALLHAVEN_CATEGORY_OPTIONS"
+                @update:value="(v: WallhavenCategory) => store.setWallhavenCategory(v)"
+              />
+            </div>
+            <div class="fp-row">
+              <span class="fp-label">分辨率</span>
+              <NSelect
+                size="small"
+                class="fp-select"
+                :menu-props="FILTER_MENU_PROPS"
+                :value="store.wallhavenAtleast"
+                :options="WALLHAVEN_ATLEAST_OPTIONS"
+                @update:value="(v: WallhavenAtleast) => store.setWallhavenAtleast(v)"
+              />
+            </div>
+            <div class="fp-row">
+              <span class="fp-label">比例</span>
+              <NSelect
+                size="small"
+                class="fp-select"
+                :menu-props="FILTER_MENU_PROPS"
+                :value="store.wallhavenRatio"
+                :options="WALLHAVEN_RATIO_OPTIONS"
+                @update:value="(v: WallhavenRatio) => store.setWallhavenRatio(v)"
+              />
+            </div>
+
+            <!-- 颜色：单选（接口 `colors` 只吃一个十六进制值）。
+                 12 个色块排 6×2，每格 20px + 6px gap = 150px，塞得进面板。 -->
+            <div class="fp-col">
+              <span class="fp-label">颜色</span>
+              <div class="fp-swatches mt-1.5 grid grid-cols-6 gap-1.5">
+                <button
+                  v-for="c in WALLHAVEN_COLORS"
+                  :key="c.value"
+                  class="color-dot cursor-pointer"
+                  :class="{ 'is-on': store.wallhavenColor === c.value }"
+                  :style="{ background: c.hex }"
+                  :title="c.label"
+                  @click="store.setWallhavenColor(c.value)"
+                />
+              </div>
+            </div>
+
+            <div class="fp-foot mt-2 flex items-center justify-between border-t border-line pt-2">
+              <span class="text-[10.5px] text-faint">
+                {{ store.wallhavenFilterCount ? `已启用 ${store.wallhavenFilterCount} 项` : "改动即时生效" }}
+              </span>
+              <button
+                class="fp-reset shrink-0 cursor-pointer rounded px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:bg-white/10 hover:text-tx"
+                @click="store.resetWallhavenFilters()"
+              >
+                重置
+              </button>
+            </div>
+          </template>
+
+          <template v-else>
           <!-- 分类：图片与视频共用 -->
           <div class="fp-row">
             <span class="fp-label">分类</span>
@@ -1534,6 +1756,7 @@ function onThumbLoad(e: Event) {
               重置
             </button>
           </div>
+          </template>
         </div>
       </Transition>
     </Teleport>

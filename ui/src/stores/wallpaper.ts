@@ -59,6 +59,28 @@ import {
   type PixabayVideoData,
   type PixabayVideoPageData,
   type DownloadedPixabayData,
+  // Wallhaven
+  WALLHAVEN_QUERY_KEY,
+  WALLHAVEN_CATEGORY_KEY,
+  WALLHAVEN_SORT_KEY,
+  WALLHAVEN_ATLEAST_KEY,
+  WALLHAVEN_RATIO_KEY,
+  WALLHAVEN_COLOR_KEY,
+  WALLHAVEN_API_BASE_KEY,
+  WALLHAVEN_IMAGE_BASE_KEY,
+  WALLHAVEN_CATEGORIES,
+  WALLHAVEN_SORTS,
+  WALLHAVEN_ATLEASTS,
+  WALLHAVEN_RATIOS,
+  WALLHAVEN_COLORS,
+  type WallhavenCategory,
+  type WallhavenSort,
+  type WallhavenAtleast,
+  type WallhavenRatio,
+  type WallhavenWallpaperData,
+  type WallhavenPageData,
+  type DownloadedWallhavenData,
+  type WallhavenDownloadDirInfo,
 } from "./wallpaper/types";
 
 // 类型、常量与纯工具函数从子模块统一再导出，调用方 import 路径保持不变
@@ -220,6 +242,109 @@ function readPixabayVideoQuality(): PixabayVideoQuality {
   }
 }
 
+// ---- Wallhaven 偏好读取 ----
+//
+// 与 Pixabay 同一套原则：**非法值一律回退默认**。手改 localStorage、旧版本残留
+// 都会让 NSelect 拿到一个不在选项里的值、显示为空白（不报错，最难查）。
+
+function readWallhavenQuery(): string {
+  try {
+    return localStorage.getItem(WALLHAVEN_QUERY_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/// 分类默认「全部」（111）
+function readWallhavenCategory(): WallhavenCategory {
+  try {
+    const raw = localStorage.getItem(WALLHAVEN_CATEGORY_KEY) ?? "";
+    return (WALLHAVEN_CATEGORIES as readonly { value: string }[]).some((c) => c.value === raw)
+      ? (raw as WallhavenCategory)
+      : "111";
+  } catch {
+    return "111";
+  }
+}
+
+/// 排序默认「热门」（favorites）。`date_added` 首屏太杂，
+/// `favorites` 更接近"壁纸站首页"的观感，与 Pixabay 默认 popular 同理。
+function readWallhavenSort(): WallhavenSort {
+  try {
+    const raw = localStorage.getItem(WALLHAVEN_SORT_KEY) ?? "";
+    return (WALLHAVEN_SORTS as readonly { value: string }[]).some((s) => s.value === raw)
+      ? (raw as WallhavenSort)
+      : "favorites";
+  } catch {
+    return "favorites";
+  }
+}
+
+function readWallhavenAtleast(): WallhavenAtleast {
+  try {
+    const raw = localStorage.getItem(WALLHAVEN_ATLEAST_KEY);
+    if (raw === null) return "";
+    return (WALLHAVEN_ATLEASTS as readonly { value: string }[]).some((s) => s.value === raw)
+      ? (raw as WallhavenAtleast)
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function readWallhavenRatio(): WallhavenRatio {
+  try {
+    const raw = localStorage.getItem(WALLHAVEN_RATIO_KEY);
+    if (raw === null) return "";
+    return (WALLHAVEN_RATIOS as readonly { value: string }[]).some((s) => s.value === raw)
+      ? (raw as WallhavenRatio)
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+/// 颜色默认不筛（空串）。存的是 6 位十六进制（不带 #）。
+function readWallhavenColor(): string {
+  try {
+    const raw = localStorage.getItem(WALLHAVEN_COLOR_KEY) ?? "";
+    return (WALLHAVEN_COLORS as readonly { value: string }[]).some((c) => c.value === raw)
+      ? raw
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+/// 自定义接口地址，默认空串（= 走官方）。
+///
+/// 这里**只做粗筛**：非 `http(s)://` 开头的一律当没填，避免用户粘了一串
+/// 中文说明或少了协议头，导致整个源静默不可用。真正的规范化（补 `/api/v1/search`、
+/// 吃掉尾斜杠）在后端 `resolve_api_base` 里，两边各管一段。
+function readWallhavenApiBase(): string {
+  try {
+    const raw = (localStorage.getItem(WALLHAVEN_API_BASE_KEY) ?? "").trim();
+    if (!raw) return "";
+    return /^https?:\/\//i.test(raw) ? raw : "";
+  } catch {
+    return "";
+  }
+}
+
+/// 自定义图片地址，默认空串（= 官方 CDN，不替换）。
+///
+/// 粗筛口径与接口地址一致：不是 `http(s)://` 开头就当没填 —— 宁可回退官方，
+/// 也不要让一串错字把所有缩略图变成 404。
+function readWallhavenImageBase(): string {
+  try {
+    const raw = (localStorage.getItem(WALLHAVEN_IMAGE_BASE_KEY) ?? "").trim();
+    if (!raw) return "";
+    return /^https?:\/\//i.test(raw) ? raw : "";
+  } catch {
+    return "";
+  }
+}
+
 /// 读取持久化的动态壁纸静音偏好。默认 **false（出声）** ——
 /// 用户主动把某个视频设为桌面动态壁纸时期待的是完整效果，静音是一个
 /// 需要显式打开的开关，而不是"默认悄悄静音、想听还得自己找"。
@@ -366,6 +491,52 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   const bingDirInfo = ref<BingDownloadDirInfo | null>(null);
   // Pixabay 下载目录（`<壁纸目录>\Pixabay`），同样只在设置页只读展示。
   const pixabayDirInfo = ref<PixabayDownloadDirInfo | null>(null);
+
+  // ---- Wallhaven 在线图库 ----
+  //
+  // 结构与 Pixabay 图片那条同构（服务端分页 + 远程 URL + 设为壁纸才下载），
+  // 但**没有视频分支**、**不需要 key**，身份键是 6 位字母数字 id。
+  //
+  // 唯一的额外状态是 `wallhavenSeed`：`sorting = random` 时第一页响应会带一个
+  // seed，后续页必须原样回传，否则每翻一页都是新的一批随机图（会看到重复图、
+  // 也永远翻不到底）。任何筛选变更都必须把 seed 清掉，让接口重新生成一批。
+  const wallhavenQuery = ref(readWallhavenQuery());
+  const wallhavenCategory = ref<WallhavenCategory>(readWallhavenCategory());
+  const wallhavenSort = ref<WallhavenSort>(readWallhavenSort());
+  const wallhavenAtleast = ref<WallhavenAtleast>(readWallhavenAtleast());
+  const wallhavenRatio = ref<WallhavenRatio>(readWallhavenRatio());
+  /// 颜色（6 位十六进制，空串 = 不筛）
+  const wallhavenColor = ref(readWallhavenColor());
+  /// 自定义接口地址（空串 = 官方）。
+  ///
+  /// 只解决"当前网络连不上 wallhaven.cc"这一种情况：用户自建反代 / 用可用的
+  /// 加速地址时填在这里。**不内置任何第三方镜像** —— 镜像无授权、可能篡改内容、
+  /// 随时会死，写进产品等于给自己埋雷。
+  const wallhavenApiBase = ref(readWallhavenApiBase());
+  /// 自定义图片地址（空串 = 官方 CDN）。
+  ///
+  /// 单独一项而不是复用接口地址：反代通常只配了 `/api/`，
+  /// 缩略图仍指向 `th.wallhaven.cc` —— 这就是"列表有图、缩略图全灰"的成因。
+  const wallhavenImageBase = ref(readWallhavenImageBase());
+  /// 已加载到第几页（0 = 还没加载过）
+  const wallhavenPage = ref(0);
+  const wallhavenHasMore = ref(false);
+  const wallhavenLoading = ref(false);
+  /// 随机排序的种子（空串 = 没有 / 需要重新生成）
+  const wallhavenSeed = ref("");
+  /// Wallhaven 图片 id → 本地路径（"打开所在目录"与绿框判定用）
+  const wallhavenLocalPaths = ref<Record<string, string>>({});
+  /// 本地壁纸目录里确实存在的 Wallhaven id（「已下载」徽标的唯一判据）
+  const wallhavenDownloadedIds = ref<Set<string>>(new Set());
+  /// 正在下载的 id（空串 = 没有下载在进行）
+  const wallhavenDownloadingId = ref("");
+  /// 最近一次加载失败的原始错误（空串 = 没有错误）。
+  ///
+  /// 单独存一份的原因：toast 三秒就消失，而"连不上 Wallhaven"是一个**持续状态**——
+  /// 列表空着、用户不知道是没结果还是没连上，得在空态里常驻显示 + 给重试入口。
+  const wallhavenError = ref("");
+  // Wallhaven 下载目录（`<壁纸目录>\Wallhaven`），只在设置页只读展示。
+  const wallhavenDirInfo = ref<WallhavenDownloadDirInfo | null>(null);
 
   // 必应**历史归档**的加载游标：下一个要拉的年月。
   //
@@ -564,6 +735,10 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   // "从空到有"的入口，收起等于把用户唯一的出路藏起来。
   const showPixabayTools = computed(() => source.value === "pixabay");
 
+  // Wallhaven 工具条（搜索 + 筛选）是否显示：同样只要停在该选项卡就显示 ——
+  // 搜索框本身就是"从空到有"的入口，没有"内容为空就收起"的理由。
+  const showWallhavenTools = computed(() => source.value === "wallhaven");
+
   // ---- 右键菜单 ----
   function openContextMenu(item: WallpaperItem, x: number, y: number) {
     ctxItem.value = item;
@@ -581,6 +756,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       source.value === "favorites" ||
       item.kind === "bing" ||
       item.kind === "pixabay" ||
+      item.kind === "wallhaven" ||
       // 在线视频同样是远程资源，本地无文件；删除入口统一留在「本地」选项卡
       item.kind === "pixabay-video";
   }
@@ -634,7 +810,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   // 设置来源可见性：仅负责"隐藏当前选项卡时自动切回本地"的联动，
   // 可见性更新与持久化由 useSourceState.updateSourceVisibility 完成
   function setSourceVisibility(
-    key: "system" | "favorites" | "bing" | "pixabay",
+    key: "system" | "favorites" | "bing" | "pixabay" | "wallhaven",
     visible: boolean
   ) {
     updateSourceVisibility(key, visible);
@@ -692,6 +868,28 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
         const next = new Set(pixabayDownloadedIds.value);
         next.add(key);
         pixabayDownloadedIds.value = next;
+      }
+      return local;
+    }
+
+    // Wallhaven：按 6 位字母数字 id 下载，落盘 `Wallhaven_<id>.<ext>`。
+    // 与 Pixabay 一样登记在**独立**的两份记录里（身份键不同，混用会互相点亮徽标）。
+    if (item.kind === "wallhaven") {
+      const id = item.onlineId || "";
+      if (!id) throw new Error("Wallhaven 图片缺少 id，无法下载");
+      const local = (await invoke("download_wallhaven_wallpaper", {
+        url: item.path || "",
+        id,
+        // 接口给的 MIME 比 URL 后缀可靠（CDN 地址可能被改写）
+        fileType: item.fileType || "",
+        directory: resolveDirArg(),
+      })) as string;
+      if (local) {
+        wallhavenLocalPaths.value = { ...wallhavenLocalPaths.value, [id]: local };
+        // 刚下载完的文件一定在壁纸目录里，徽标立刻点亮（不必等下一次扫描）
+        const next = new Set(wallhavenDownloadedIds.value);
+        next.add(id);
+        wallhavenDownloadedIds.value = next;
       }
       return local;
     }
@@ -1183,6 +1381,244 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     }
   }
 
+  // ---- Wallhaven 在线图库：列表 / 下载 / 徽标 ----
+  //
+  // 与 Pixabay 图片那条同构，差别只有三点：
+  // ① 不需要 key；② 身份键是 6 位字母数字 id（不能 Number() 化）；
+  // ③ `sorting = random` 要回传 seed。
+
+  /// 后端条目 → 列表项。`onlineId` 是「已下载」徽标与"当前壁纸"回指的唯一键。
+  ///
+  /// 接口没有标题也没有作者，`title` 用分辨率（后端已把 `x` 换成 `×`）——
+  /// 对壁纸场景来说"这张是 2560×1600"比"wallhaven-4x16yv"有用。
+  function wallhavenToEntry(b: WallhavenWallpaperData): WallpaperEntryData {
+    return {
+      path: b.url,
+      thumb: b.thumb,
+      title: b.title || b.resolution || "Wallhaven",
+      kind: "wallhaven" as WallpaperKind,
+      // 统一小写：后端扫描文件名时会 lowercase（`parse_cached_name`），
+      // 这里不归一化的话徽标判定会在大小写不一致时永远不亮。
+      onlineId: (b.id || "").toLowerCase(),
+      fileType: b.file_type || "",
+    };
+  }
+
+  /// 调后端拉一页。
+  ///
+  /// 参数 camelCase / 返回 snake_case（同 Pixabay）。
+  /// `seed` 只在随机排序下回传：其它排序带上它没有意义，还会让缓存指纹多分叉。
+  async function fetchWallhavenPage(page: number): Promise<WallhavenPageData> {
+    const isRandom = wallhavenSort.value === "random";
+    return (await invoke("list_wallhaven_wallpapers", {
+      query: wallhavenQuery.value,
+      categories: wallhavenCategory.value,
+      sorting: wallhavenSort.value,
+      order: "desc",
+      atleast: wallhavenAtleast.value || null,
+      ratios: wallhavenRatio.value || null,
+      colors: wallhavenColor.value || null,
+      page,
+      seed: isRandom && wallhavenSeed.value ? wallhavenSeed.value : null,
+      apiBase: wallhavenApiBase.value || null,
+      imageBase: wallhavenImageBase.value || null,
+    })) as WallhavenPageData;
+  }
+
+  /// 只下载、**不设置桌面**（对应必应 / Pixabay 的同名函数）
+  async function downloadWallhavenWallpaper(item: WallpaperItem): Promise<boolean> {
+    if (item.kind !== "wallhaven") return false;
+    if (isWallhavenDownloaded(item)) {
+      toast("这张已经在本地壁纸目录里了", "warning");
+      return true;
+    }
+    wallhavenDownloadingId.value = item.onlineId || "";
+    try {
+      const local = await ensureLocalPath(item);
+      if (!local) throw new Error("未返回本地路径");
+      toast(`已下载到本地：${baseName(local)}`, "success");
+      return true;
+    } catch (err: unknown) {
+      toast("下载失败：" + ((err as Error)?.message || String(err)), "error");
+      return false;
+    } finally {
+      wallhavenDownloadingId.value = "";
+    }
+  }
+
+  /// 刷新"哪些 Wallhaven 图已经在本地了"—— 与必应 / Pixabay 同一套口径
+  /// （扫本地壁纸目录），保证徽标亮着就一定能在「本地」选项卡里找到。
+  async function refreshDownloadedWallhavenIds(): Promise<void> {
+    try {
+      const list = (await invoke("list_downloaded_wallhaven_wallpapers", {
+        directory: resolveDirArg(),
+      })) as DownloadedWallhavenData[];
+      wallhavenDownloadedIds.value = new Set(list.map((d) => d.id).filter(Boolean));
+    } catch {
+      wallhavenDownloadedIds.value = new Set();
+    }
+  }
+
+  function isWallhavenDownloaded(item: WallpaperItem): boolean {
+    if (item.kind !== "wallhaven" || !item.onlineId) return false;
+    return wallhavenDownloadedIds.value.has(item.onlineId);
+  }
+
+  /// 点徽标：跳到「本地」并定位到该文件。搜索词带完整前缀，避免和别的前缀撞。
+  async function openInLocalWallhaven(item: WallpaperItem): Promise<void> {
+    if (item.kind !== "wallhaven" || !item.onlineId) return;
+    if (source.value !== "local") await setSource("local");
+    if (localFilter.value !== "all") setLocalFilter("all");
+    setLocalQuery(`Wallhaven_${item.onlineId}`);
+  }
+
+  /// 重置分页并重新拉第一页（改搜索词 / 筛选 / 排序之后调用）。
+  /// **seed 一并清掉**：任何筛选变更都该换一批随机图。
+  async function reloadWallhaven(): Promise<void> {
+    wallhavenPage.value = 0;
+    wallhavenHasMore.value = false;
+    wallhavenSeed.value = "";
+    wallhavenError.value = "";
+    if (source.value === "wallhaven") await loadWallpapers();
+  }
+
+  // Wallhaven 筛选 setter。套路与 Pixabay 一致：
+  // 值没变直接返回 → 写 localStorage → 停在当前页签时复位重拉。
+  function persistWallhaven(key: string, value: string) {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      /* localStorage 不可用时静默降级：本次仍生效，只是不持久化 */
+    }
+  }
+
+  async function setWallhavenQuery(next: string) {
+    if (wallhavenQuery.value === next) return;
+    wallhavenQuery.value = next;
+    persistWallhaven(WALLHAVEN_QUERY_KEY, next);
+    if (source.value === "wallhaven") await reloadWallhaven();
+  }
+
+  async function setWallhavenCategory(next: WallhavenCategory) {
+    if (wallhavenCategory.value === next) return;
+    wallhavenCategory.value = next;
+    persistWallhaven(WALLHAVEN_CATEGORY_KEY, next);
+    if (source.value === "wallhaven") await reloadWallhaven();
+  }
+
+  async function setWallhavenSort(next: WallhavenSort) {
+    if (wallhavenSort.value === next) return;
+    wallhavenSort.value = next;
+    persistWallhaven(WALLHAVEN_SORT_KEY, next);
+    if (source.value === "wallhaven") await reloadWallhaven();
+  }
+
+  async function setWallhavenAtleast(next: WallhavenAtleast) {
+    if (wallhavenAtleast.value === next) return;
+    wallhavenAtleast.value = next;
+    persistWallhaven(WALLHAVEN_ATLEAST_KEY, next);
+    if (source.value === "wallhaven") await reloadWallhaven();
+  }
+
+  async function setWallhavenRatio(next: WallhavenRatio) {
+    if (wallhavenRatio.value === next) return;
+    wallhavenRatio.value = next;
+    persistWallhaven(WALLHAVEN_RATIO_KEY, next);
+    if (source.value === "wallhaven") await reloadWallhaven();
+  }
+
+  /// 颜色是**单选**（接口 `colors` 只吃一个十六进制值），再点一次同一个色块 = 取消。
+  async function setWallhavenColor(next: string) {
+    const v = wallhavenColor.value === next ? "" : next;
+    if (wallhavenColor.value === v) return;
+    wallhavenColor.value = v;
+    persistWallhaven(WALLHAVEN_COLOR_KEY, v);
+    if (source.value === "wallhaven") await reloadWallhaven();
+  }
+
+  /// 自定义接口地址（空串 = 回到官方）。
+  ///
+  /// 前端只挡"少了协议头"这种明显错误（`readWallhavenApiBase` 会丢弃并回退官方），
+  /// 真正的规范化 —— 补 `/api/v1/search`、吃尾斜杠 —— 在 Rust 侧 `resolve_api_base`。
+  /// 填错的代价只是拉不到数据、错误提示里会让他检查地址，不会让整个来源消失。
+  /// 自定义接口地址（空串 = 回到官方）。
+  ///
+  /// 前端只挡"少了协议头"这种明显错误（`readWallhavenApiBase` 会丢弃并回退官方），
+  /// 真正的规范化 —— 补 `/api/v1/search`、吃尾斜杠 —— 在 Rust 侧 `resolve_api_base`。
+  /// 填错的代价只是拉不到数据、错误提示里会让他检查地址，不会让整个来源消失。
+  ///
+  /// **不在这里重载列表**（与 `setPixabayKey` 同一约定）：它不是 UI 动作，
+  /// 两个地址一起保存时各刷一次会并发拉两遍，由调用方保存完统一刷一次。
+  function setWallhavenApiBase(next: string) {
+    const v = next.trim();
+    if (wallhavenApiBase.value === v) return;
+    wallhavenApiBase.value = v;
+    persistWallhaven(WALLHAVEN_API_BASE_KEY, v);
+  }
+
+  /// 设置自定义图片地址（空串 = 回到官方 CDN）。
+  ///
+  /// 只影响展示：后端在返回前替换 `th.` / `w.` 两个主机，路径原样保留。
+  /// 所以反代要覆盖的路径是 `/lg/`、`/orig/`、`/small/`（缩略图）与 `/full/`（原图）。
+  function setWallhavenImageBase(next: string) {
+    const v = next.trim();
+    if (wallhavenImageBase.value === v) return;
+    wallhavenImageBase.value = v;
+    persistWallhaven(WALLHAVEN_IMAGE_BASE_KEY, v);
+  }
+
+  /// 已启用的筛选数（只统计**偏离默认值**的项，否则一进来就显示 4，等于谎报）。
+  /// 排序不在此列 —— 它在页脚，与 Pixabay 的口径一致。
+  const wallhavenFilterCount = computed(() => {
+    let n = 0;
+    if (wallhavenCategory.value !== "111") n++;
+    if (wallhavenAtleast.value !== "") n++;
+    if (wallhavenRatio.value !== "") n++;
+    if (wallhavenColor.value !== "") n++;
+    return n;
+  });
+
+  /// 一键重置全部筛选（**一次重载**，不要逐个 setter 调 —— 那会连拉四次）。
+  async function resetWallhavenFilters() {
+    wallhavenCategory.value = "111";
+    wallhavenAtleast.value = "";
+    wallhavenRatio.value = "";
+    wallhavenColor.value = "";
+    persistWallhaven(WALLHAVEN_CATEGORY_KEY, "111");
+    persistWallhaven(WALLHAVEN_ATLEAST_KEY, "");
+    persistWallhaven(WALLHAVEN_RATIO_KEY, "");
+    persistWallhaven(WALLHAVEN_COLOR_KEY, "");
+    if (source.value === "wallhaven") await reloadWallhaven();
+  }
+
+  /// 拉下一页并追加（服务端分页）。
+  async function loadMoreWallhaven(): Promise<void> {
+    if (wallhavenLoading.value || !wallhavenHasMore.value) return;
+    wallhavenLoading.value = true;
+    try {
+      const next = wallhavenPage.value + 1;
+      const page = await fetchWallhavenPage(next);
+      wallhavenPage.value = page.page || next;
+      wallhavenHasMore.value = page.has_more;
+      // 随机排序：把第一页的 seed 一直带下去（后端也会回显同一个 seed）
+      if (page.seed) wallhavenSeed.value = page.seed;
+      if (!page.items.length) {
+        // 服务端说还有但这一页是空的：直接收手，否则前端会一直转圈
+        wallhavenHasMore.value = false;
+        return;
+      }
+      allEntries = allEntries.concat(page.items.map(wallhavenToEntry));
+      rawEntries = allEntries;
+      allCount.value = allEntries.length;
+      appendBatch(); // 只渲染 PAGE_SIZE 条，其余留给下一次滚动
+    } catch (err: unknown) {
+      toast("加载更多 Wallhaven 壁纸失败：" + ((err as Error)?.message || String(err)), "error");
+      wallhavenHasMore.value = false;
+    } finally {
+      wallhavenLoading.value = false;
+    }
+  }
+
   // 从本地文件名反推必应日期（`BingWallpaper_YYYYMMDD.jpg`）。
   //
   // **`BingWallpaper_` 前缀是"这是必应下载的"的唯一标记**，正则必须锚定它 ——
@@ -1302,6 +1738,17 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     }
   }
 
+  /// 刷新 Wallhaven 下载目录（`<壁纸目录>\Wallhaven`），设置页只读展示用。
+  async function refreshWallhavenDirInfo(): Promise<void> {
+    try {
+      wallhavenDirInfo.value = (await invoke("get_wallhaven_download_dir_info", {
+        directory: resolveDirArg(),
+      })) as WallhavenDownloadDirInfo;
+    } catch {
+      wallhavenDirInfo.value = null;
+    }
+  }
+
   // 点徽标：跳到「本地」选项卡并定位到那张文件。
   //
   // 用**搜索词定位**而不是滚动定位：分页是 12 张/页、`loadMore` 还有 200ms 防抖，
@@ -1328,6 +1775,10 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     }
     if (item.kind === "pixabay") {
       const local = item.onlineId ? pixabayLocalPaths.value[item.onlineId] : "";
+      return !!local && local === cur.path;
+    }
+    if (item.kind === "wallhaven") {
+      const local = item.onlineId ? wallhavenLocalPaths.value[item.onlineId] : "";
       return !!local && local === cur.path;
     }
     return !!item.path && item.path === cur.path;
@@ -1659,6 +2110,22 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
             await refreshDownloadedPixabayIds();
           }
         }
+      } else if (source.value === "wallhaven") {
+        // Wallhaven 在线图库 = 服务端分页（固定 24 条/页），**不需要 key**。
+        // 每次重载都清 seed：换搜索词/筛选后应该是一批新的图，
+        // 沿用旧 seed 会让"随机"看起来没生效。
+        wallhavenPage.value = 0;
+        wallhavenHasMore.value = false;
+        wallhavenSeed.value = "";
+        const page = await fetchWallhavenPage(1);
+        allEntries = page.items.map(wallhavenToEntry);
+        wallhavenPage.value = page.page || 1;
+        wallhavenHasMore.value = page.has_more;
+        wallhavenSeed.value = page.seed || "";
+        // 拉到了就说明这次是通的，把上一次的失败提示清掉
+        wallhavenError.value = "";
+        // 徽标数据在列表就位之后再取：它失败只该影响徽标，不该让列表报错
+        await refreshDownloadedWallhavenIds();
       } else {
         allEntries = (await invoke("list_local_wallpapers", {
           directory: resolveDirArg(),
@@ -1693,7 +2160,10 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       // 加工（筛选 + 搜索 + 排序）必须在分页之前：allCount / hasMore / x-y 计数都由此派生
       applyLocalRefine();
     } catch (err: unknown) {
-      toast("加载壁纸失败：" + ((err as Error)?.message || String(err)), "error");
+      const msg = (err as Error)?.message || String(err);
+      // Wallhaven 单独留一份：空态里要常驻显示"是没连上，不是没结果"
+      if (source.value === "wallhaven") wallhavenError.value = msg;
+      toast("加载壁纸失败：" + msg, "error");
     }
   }
 
@@ -1724,6 +2194,8 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
         duration: e.duration,
         quality: e.quality,
         sizeBytes: e.sizeBytes,
+        // 漏 fileType ⇒ Wallhaven 下载时按 URL 猜扩展名，CDN 改写地址时会存成错的格式
+        fileType: e.fileType,
       });
       loadedCount++;
     });
@@ -1734,7 +2206,8 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       loadedCount < allEntries.length ||
       (source.value === "bing" && !bingArchiveEnd.value && bingArchiveCursor.value !== null) ||
       // Pixabay 是服务端分页：缓冲渲染完后还有没有下一页，只有后端知道
-      (source.value === "pixabay" && pixabayHasMore.value);
+      (source.value === "pixabay" && pixabayHasMore.value) ||
+      (source.value === "wallhaven" && wallhavenHasMore.value);
   }
 
   async function loadMore() {
@@ -1757,6 +2230,22 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       loadingMore.value = true;
       try {
         await loadMorePixabay();
+      } finally {
+        loadingMoreLock = false;
+        loadingMore.value = false;
+      }
+      return;
+    }
+    // Wallhaven：同样是服务端分页，缓冲渲染完 ⇒ 要下一页
+    if (
+      source.value === "wallhaven" &&
+      loadedCount >= allEntries.length &&
+      wallhavenHasMore.value
+    ) {
+      loadingMoreLock = true;
+      loadingMore.value = true;
+      try {
+        await loadMoreWallhaven();
       } finally {
         loadingMoreLock = false;
         loadingMore.value = false;
@@ -2356,6 +2845,8 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       if (item.kind === "bing") await downloadBingWallpaper(item);
       else if (item.kind === "pixabay" || item.kind === "pixabay-video") {
         await downloadPixabayWallpaper(item);
+      } else if (item.kind === "wallhaven") {
+        await downloadWallhavenWallpaper(item);
       }
       return;
     }
@@ -2365,7 +2856,8 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       if (
         item.kind === "bing" ||
         item.kind === "pixabay" ||
-        item.kind === "pixabay-video"
+        item.kind === "pixabay-video" ||
+        item.kind === "wallhaven"
       ) {
         toast("在线壁纸暂不支持收藏", "warning");
         return;
@@ -2391,7 +2883,10 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
             : item.kind === "pixabay-video"
               ? (item.onlineId && pixabayVideoLocalPaths.value[item.onlineId]) ||
                 (!isRemoteSrc(item.path || "") ? item.path || "" : "")
-              : item.path || "";
+              : item.kind === "wallhaven"
+                ? (item.onlineId && wallhavenLocalPaths.value[item.onlineId]) ||
+                  (!isRemoteSrc(item.path || "") ? item.path || "" : "")
+                : item.path || "";
       if (!localPath) {
         // ⚠️ 在线项不能直接拿 `item.path` 去 reveal —— 那是 `https://...`，
         // 传给 reveal_in_explorer 只会得到一个莫名其妙的"打开目录失败"
@@ -2400,7 +2895,9 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
             ? "这张还没下载到本地，先点卡片上的「下载」存到壁纸目录"
             : item.kind === "pixabay"
               ? "这张还没下载到本地，先点卡片上的「下载」存到壁纸目录"
-              : "当前壁纸无本地路径",
+              : item.kind === "wallhaven"
+                ? "这张还没下载到本地，先点卡片上的「下载」存到壁纸目录"
+                : "当前壁纸无本地路径",
           "warning"
         );
         return;
@@ -2417,7 +2914,13 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       // 系统壁纸来源只读：纵深防御，禁止进入删除流程；
       // 在线源（必应 / Pixabay）选项卡同样不提供删除（在线项本地无文件；
       // 本地缓存项的删除入口统一留在「本地」选项卡，避免同一文件两处可删）
-      if (source.value === "system" || item.kind === "bing" || item.kind === "pixabay") return;
+      if (
+        source.value === "system" ||
+        item.kind === "bing" ||
+        item.kind === "pixabay" ||
+        item.kind === "wallhaven"
+      )
+        return;
       await removeWallpaper(item);
     }
   }
@@ -2501,17 +3004,32 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     pixabayColors,
     pixabayVideoType,
     pixabayVideoQuality,
+    wallhavenDirInfo,
+    wallhavenQuery,
+    wallhavenCategory,
+    wallhavenSort,
+    wallhavenAtleast,
+    wallhavenRatio,
+    wallhavenColor,
+    wallhavenApiBase,
+    wallhavenImageBase,
+    wallhavenLoading,
+    wallhavenError,
+    wallhavenDownloadingId,
     // getters
     hasMore,
     previewTarget,
     showLocalFilter,
     showLocalTools,
     showPixabayTools,
+    showWallhavenTools,
     pixabayFilterCount,
+    wallhavenFilterCount,
     isCurrentItem,
     isCurrentVideo,
     isBingDownloaded,
     isPixabayDownloaded,
+    isWallhavenDownloaded,
     videoWallpaper,
     videoMuted,
     // 播放参数四个 ref **必须导出**：面板要读它们做高亮、摘要与片段输入框回填。
@@ -2540,6 +3058,18 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     downloadBingWallpaper,
     downloadPixabayWallpaper,
     openInLocalPixabay,
+    downloadWallhavenWallpaper,
+    openInLocalWallhaven,
+    reloadWallhaven,
+    setWallhavenQuery,
+    setWallhavenCategory,
+    setWallhavenSort,
+    setWallhavenApiBase,
+    setWallhavenImageBase,
+    setWallhavenAtleast,
+    setWallhavenRatio,
+    setWallhavenColor,
+    resetWallhavenFilters,
     setPixabayKey,
     setPixabayQuery,
     setPixabayCategory,
@@ -2556,6 +3086,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     reloadPixabay,
     refreshBingDirInfo,
     refreshPixabayDirInfo,
+    refreshWallhavenDirInfo,
     loadFavorites,
     isFavorite,
     toggleFavorite,

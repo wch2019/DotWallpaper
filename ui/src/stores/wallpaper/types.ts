@@ -8,13 +8,17 @@ export type WallpaperKind =
   /// 前者是远程 URL + 需要下载才能设成动态壁纸，后者走 `SPI_SETDESKWALLPAPER`。
   /// 合成一个 kind 会让每个分支都要再判一次"这条到底是图还是视频"。
   | "pixabay-video"
+  /// Wallhaven 在线壁纸（纯图片，没有视频）。与 `pixabay` 分开是因为
+  /// 身份键（6 位字母数字 id vs 数字 id）和下载落盘前缀都不同。
+  | "wallhaven"
   | "video";
 
 /// 壁纸来源选项卡：local = 本地壁纸（可增删），system = Windows 自带系统壁纸（只读），
 /// favorites = 收藏夹（书签视图：跨本地/系统来源，仅标记不删文件），
 /// bing = 必应在线壁纸（日期流，列表远程 URL，设为壁纸时才下载本地），
-/// pixabay = Pixabay 在线图库（搜索式，同样列表远程、设为壁纸才下载）
-export type WallpaperSource = "local" | "system" | "favorites" | "bing" | "pixabay";
+/// pixabay = Pixabay 在线图库（搜索式，同样列表远程、设为壁纸才下载），
+/// wallhaven = Wallhaven 在线图库（搜索式，免 key，只提供 SFW）
+export type WallpaperSource = "local" | "system" | "favorites" | "bing" | "pixabay" | "wallhaven";
 
 /// 本地来源的类型筛选：all = 全部（图片 + 视频），image = 仅静态图片，video = 仅视频动态壁纸。
 /// 只作用于 local 来源；其余来源类型单一（system 仅图片、bing 仅在线图片）
@@ -52,6 +56,7 @@ export type SourceVisibility = {
   favorites: boolean;
   bing: boolean;
   pixabay: boolean;
+  wallhaven: boolean;
 };
 // 选项卡展示顺序（独立于可见性：顺序控制渲染次序，可见性控制是否显示）
 export const SOURCE_ORDER_KEY = "dot-wallpaper-source-order";
@@ -61,6 +66,7 @@ export const SOURCE_ORDER_DEFAULT: WallpaperSource[] = [
   "system",
   "bing",
   "pixabay",
+  "wallhaven",
 ];
 
 export interface WallpaperItem {
@@ -87,6 +93,9 @@ export interface WallpaperItem {
   quality?: string;
   /// 视频文件大小（字节），0 = 接口没给。用于提示"约 xx MB"
   sizeBytes?: number;
+  /// 在线原图的 MIME（如 `image/jpeg`），仅 Wallhaven 有。
+  /// 下载时用它决定落盘扩展名 —— 按 URL 猜在 CDN 改写地址时会猜错。
+  fileType?: string;
   applying?: boolean; // 是否正在设置中
 }
 
@@ -104,6 +113,7 @@ export interface WallpaperEntryData {
   duration?: number; // 视频时长（秒），仅 Pixabay 在线视频
   quality?: string; // 实际拿到的清晰度档位（large/medium/small/tiny），仅在线视频
   sizeBytes?: number; // 视频大小（字节），0 = 接口没给
+  fileType?: string; // 在线原图 MIME（如 image/jpeg），仅 Wallhaven
   /// 文件修改时间（Unix 秒）—— 本地/系统来源由后端 stat 得到，**仅供排序**。
   /// 必应在线壁纸没有本地文件，恒为 undefined。
   mtime?: number | null;
@@ -478,6 +488,150 @@ export interface PixabayVideoPageData {
   total_hits: number;
   page: number;
   has_more: boolean;
+}
+
+// ---------- Wallhaven 在线图库 ----------
+
+/// Wallhaven 下载目录信息（设置页只读展示用）。
+/// 与必应 / Pixabay 一样是派生目录（`<壁纸目录>\Wallhaven`），没有遗留目录。
+export interface WallhavenDownloadDirInfo {
+  dir: string;
+}
+
+/// 搜索词 / 筛选偏好。
+///
+/// 与 Pixabay 同一套理由：**全部持久化**。不持久化时首屏永远是接口默认的
+/// `date_added` 最新一批（大量无关杂图），用户会以为"这个图库就这水平"。
+export const WALLHAVEN_QUERY_KEY = "dot-wallpaper-wallhaven-query";
+export const WALLHAVEN_CATEGORY_KEY = "dot-wallpaper-wallhaven-category";
+export const WALLHAVEN_SORT_KEY = "dot-wallpaper-wallhaven-sort";
+export const WALLHAVEN_ATLEAST_KEY = "dot-wallpaper-wallhaven-atleast";
+export const WALLHAVEN_RATIO_KEY = "dot-wallpaper-wallhaven-ratio";
+export const WALLHAVEN_COLOR_KEY = "dot-wallpaper-wallhaven-color";
+
+/// 自定义接口地址（留空 = 官方）。
+///
+/// 官方没有中国节点，国内访问时通时不通；社区流传的第三方镜像不可信
+/// （无授权、可能篡改内容、随时会死），所以**不内置任何镜像**，
+/// 只给一个入口：想用自建反代 / 加速地址的人自己填，不填就还是官方。
+export const WALLHAVEN_API_BASE_KEY = "dot-wallpaper-wallhaven-api-base";
+
+/// 自定义图片地址（替换 `th.` / `w.` 两个 CDN 主机，留空 = 官方 CDN）。
+///
+/// 和接口地址分开是必须的：反代常常只接管了 `/api/`，图片仍指向
+/// `th.wallhaven.cc` —— 表现就是"列表拉到了、缩略图全灰"。
+export const WALLHAVEN_IMAGE_BASE_KEY = "dot-wallpaper-wallhaven-image-base";
+
+/// 官方地址，仅用于输入框占位提示（后端也有一份，真正生效的是后端那份）。
+export const WALLHAVEN_DEFAULT_API_BASE = "https://wallhaven.cc/api/v1/search";
+
+/// 分类：接口是 3 位位掩码（常规 / 动漫 / 人物，各 0 或 1）。
+///
+/// 做成单选而不是多选：位掩码的 7 种组合对普通用户没有意义，
+/// 「全部 / 常规 / 动漫 / 人物」四个选项已经覆盖真实使用场景。
+export type WallhavenCategory = "111" | "100" | "010" | "001";
+export const WALLHAVEN_CATEGORIES = [
+  { label: "全部", value: "111" },
+  { label: "常规", value: "100" },
+  { label: "动漫", value: "010" },
+  { label: "人物", value: "001" },
+] as const;
+
+/// 排序。`random` 会由接口生成 seed，前端必须把它带回来翻页（见 store）。
+/// `relevance` 只对有关键词的搜索有意义 —— 后端在空搜索时会自动退回最新。
+export type WallhavenSort =
+  | "favorites"
+  | "date_added"
+  | "relevance"
+  | "random"
+  | "views"
+  | "toplist";
+export const WALLHAVEN_SORTS = [
+  { label: "热门", value: "favorites" },
+  { label: "最新", value: "date_added" },
+  { label: "相关", value: "relevance" },
+  { label: "随机", value: "random" },
+  { label: "浏览", value: "views" },
+  { label: "榜单", value: "toplist" },
+] as const;
+
+/// 最低分辨率（接口的 `atleast`，格式 `宽x高`）。空串 = 不限。
+export type WallhavenAtleast = "" | "1920x1080" | "2560x1440" | "3840x2160";
+export const WALLHAVEN_ATLEASTS = [
+  { label: "不限", value: "" },
+  { label: "≥1920×1080", value: "1920x1080" },
+  { label: "≥2560×1440", value: "2560x1440" },
+  { label: "≥3840×2160", value: "3840x2160" },
+] as const;
+
+/// 画面比例（接口的 `ratios`）。空串 = 不限。
+/// 9:16 是竖屏 —— 竖屏显示器 / 手机壁纸场景会用到，所以保留。
+export type WallhavenRatio = "" | "16x9" | "16x10" | "21x9" | "9x16";
+export const WALLHAVEN_RATIOS = [
+  { label: "不限", value: "" },
+  { label: "16:9", value: "16x9" },
+  { label: "16:10", value: "16x10" },
+  { label: "21:9", value: "21x9" },
+  { label: "9:16 竖屏", value: "9x16" },
+] as const;
+
+/// 颜色筛选。
+///
+/// ⚠️ **不能复用 `PIXABAY_COLORS`**：Pixabay 的 `colors` 是英文色名
+/// （`turquoise` / `grayscale`），Wallhaven 要的是 **6 位十六进制且不带 `#`**。
+/// 两者混用不会报错，只会让颜色筛选静默失效（接口收到 `turquoise` 当成无效值）。
+export const WALLHAVEN_COLORS = [
+  { value: "000000", label: "黑", hex: "#111827" },
+  { value: "808080", label: "灰", hex: "#6b7280" },
+  { value: "ffffff", label: "白", hex: "#f8fafc" },
+  { value: "ff0000", label: "红", hex: "#ef4444" },
+  { value: "ff8000", label: "橙", hex: "#f97316" },
+  { value: "ffff00", label: "黄", hex: "#eab308" },
+  { value: "00ff00", label: "绿", hex: "#22c55e" },
+  { value: "00ffff", label: "青", hex: "#14b8a6" },
+  { value: "0000ff", label: "蓝", hex: "#3b82f6" },
+  { value: "8000ff", label: "紫", hex: "#a855f7" },
+  { value: "ff00ff", label: "粉", hex: "#ec4899" },
+  { value: "8b4513", label: "棕", hex: "#92400e" },
+] as const;
+
+/// 每页条数：接口固定 24 条/页，**没有 `per_page` 参数**，这里只用于前端提示。
+export const WALLHAVEN_PAGE_SIZE = 24;
+
+/// 单条 Wallhaven 结果（对应后端 `wallhaven::WallhavenWallpaper`）
+///
+/// ⚠️ 字段名保持 **snake_case**：本项目 serde 结构体没有 `rename_all`。
+/// 写成 camelCase 不会报错，只会让 `page_url` / `file_type` 静默 undefined。
+export interface WallhavenWallpaperData {
+  id: string;
+  title: string;
+  resolution: string;
+  category: string;
+  page_url: string;
+  url: string;
+  thumb: string;
+  width: number;
+  height: number;
+  file_size: number;
+  file_type: string;
+}
+
+/// 一页结果（对应后端 `wallhaven::WallhavenPage`）
+export interface WallhavenPageData {
+  items: WallhavenWallpaperData[];
+  count: number;
+  total: number;
+  page: number;
+  last_page: number;
+  has_more: boolean;
+  /// `sorting = random` 时第一页返回的种子，后续页必须原样回传
+  seed: string | null;
+}
+
+/// 本地已下载的 Wallhaven 图（对应后端 `list_downloaded_wallhaven_wallpapers`）
+export interface DownloadedWallhavenData {
+  id: string; // 6 位字母数字 id，与 onlineId 同格式
+  path: string; // 本地绝对路径
 }
 
 /// 壁纸模糊遮罩效果参数（与后端 wallpaper::WallpaperEffect 对齐）

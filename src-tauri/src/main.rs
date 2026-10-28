@@ -9,6 +9,7 @@ mod desktop_diag;
 mod http;
 mod pixabay;
 mod thumbs;
+mod wallhaven;
 mod wallpaper;
 mod video_wallpaper;
 mod video_thumbs;
@@ -627,6 +628,130 @@ async fn get_pixabay_download_dir_info(
     })
 }
 
+/// 拉取一页 Wallhaven 搜索结果。
+///
+/// **不需要 API key**：SFW 公开接口即可用（限流 45 次/分钟，响应在模块内缓存
+/// 10 分钟以扛住来回切筛选）。`purity` 在 `wallhaven` 模块里**写死 SFW**，
+/// 这里刻意不暴露成参数 —— 桌面壁纸工具不该让 NSFW 通过一个可选参数溜进来。
+///
+/// `seed` 只在 `sorting = "random"` 时由前端回传：第一页响应里的 `meta.seed`
+/// 必须原样带回，否则每翻一页都是新的一批随机图。
+///
+/// `apiBase` 是用户在设置里填的自定义接口地址（自建反代 / 加速地址）。
+/// 留空即官方 `wallhaven.cc` —— 官方没有中国节点，国内访问时通时不通，
+/// 但第三方镜像不可信（无授权、可能篡改内容、随时会死），所以不内置镜像，
+/// 只提供这个入口让需要的人自己填。
+///
+/// `imageBase` 同理，但管的是**图片**：反代常常只接管了 `/api/`，
+/// 缩略图仍指向 `th.wallhaven.cc`，表现就是"列表有图、缩略图全灰"。
+/// 填了就替换 `th.` / `w.` 两个主机、路径原样保留；留空不动。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn list_wallhaven_wallpapers(
+    query: String,
+    categories: Option<String>,
+    sorting: Option<String>,
+    order: Option<String>,
+    atleast: Option<String>,
+    ratios: Option<String>,
+    colors: Option<String>,
+    page: u32,
+    seed: Option<String>,
+    api_base: Option<String>,
+    image_base: Option<String>,
+) -> Result<wallhaven::WallhavenPage, String> {
+    let q = wallhaven::Query {
+        query,
+        categories: categories.unwrap_or_else(|| "111".into()),
+        sorting: sorting.unwrap_or_else(|| "date_added".into()),
+        order: order.unwrap_or_else(|| "desc".into()),
+        atleast,
+        ratios,
+        colors,
+        page,
+        seed,
+        api_base,
+        image_base,
+    };
+    // 网络请求为阻塞 IO，放入 blocking 线程避免卡住主线程
+    tauri::async_runtime::spawn_blocking(move || wallhaven::fetch_page(&q))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 下载 Wallhaven 原图到本地，返回本地绝对路径。
+///
+/// 下载目录固定为 `<本地壁纸目录>\Wallhaven`（由 `directory` 派生，不可单独配置）。
+/// 落盘文件名 `Wallhaven_<id>.<jpg|png|webp>`，扩展名优先取接口的 `file_type`。
+#[tauri::command]
+async fn download_wallhaven_wallpaper(
+    url: String,
+    id: String,
+    file_type: Option<String>,
+    directory: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let dir_path = wallhaven::download_dir(directory);
+    ensure_asset_scope(&app, &dir_path);
+    let file_type = file_type.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        wallhaven::download_wallpaper(&url, &id, &file_type, &dir_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 本地已下载的 Wallhaven 条目（对应前端 `DownloadedWallhavenData`）
+#[derive(serde::Serialize)]
+struct DownloadedWallhavenItem {
+    /// 6 位字母数字 id，与在线条目的 onlineId 同格式，作为徽标判定键
+    id: String,
+    /// 本地绝对路径（点徽标跳到「本地」选项卡后据此定位）
+    path: String,
+}
+
+/// 列出**本地壁纸目录**里已下载的 Wallhaven 图（递归找 `Wallhaven_<id>.*`）。
+///
+/// 与必应 / Pixabay 同一套口径：扫本地壁纸目录而不是下载目录，保证
+/// 「已下载」徽标与「本地」选项卡能否看到该文件共用同一个事实来源。
+#[tauri::command]
+async fn list_downloaded_wallhaven_wallpapers(
+    directory: Option<String>,
+) -> Result<Vec<DownloadedWallhavenItem>, String> {
+    let dir = resolve_save_dir(directory);
+    tauri::async_runtime::spawn_blocking(move || -> Vec<DownloadedWallhavenItem> {
+        wallhaven::scan_downloaded(&dir)
+            .into_iter()
+            .map(|(id, path)| DownloadedWallhavenItem { id, path })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Wallhaven 下载目录信息（设置页只读展示用）。
+///
+/// 与必应 / Pixabay 同理：派生目录没有老版本遗留，只有 `dir` 一个字段。
+#[derive(Serialize)]
+struct WallhavenDownloadDirInfo {
+    /// `<壁纸目录>\Wallhaven`（反斜杠形式，可直接展示）
+    dir: String,
+}
+
+/// 返回 Wallhaven 下载目录（`<壁纸目录>\Wallhaven`）。
+///
+/// **路径派生只在 Rust 侧做一次**，设置页只负责展示 ——
+/// 前端自己拼 `\Wallhaven` 会让"下载到底落在哪"出现第二个事实来源。
+#[tauri::command]
+async fn get_wallhaven_download_dir_info(
+    directory: Option<String>,
+) -> Result<WallhavenDownloadDirInfo, String> {
+    let dir = wallhaven::download_dir(directory);
+    Ok(WallhavenDownloadDirInfo {
+        dir: dir.to_string_lossy().replace('/', "\\"),
+    })
+}
+
 /// 在系统资源管理器中定位文件/目录（右键"跳转到当前文件目录"）
 ///
 /// 文件使用 explorer /select 打开所在目录并选中该项；目录则直接打开。
@@ -1003,6 +1128,10 @@ fn main() {
             download_pixabay_video,
             list_downloaded_pixabay_wallpapers,
             list_downloaded_pixabay_videos,
+            list_wallhaven_wallpapers,
+            download_wallhaven_wallpaper,
+            list_downloaded_wallhaven_wallpapers,
+            get_wallhaven_download_dir_info,
             list_wallpapers_by_paths,
             pick_wallpaper_directory,
             reveal_in_explorer,
