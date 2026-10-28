@@ -7,11 +7,16 @@ import { useWallpaperStore } from "../stores/wallpaper";
 
 const store = useWallpaperStore();
 
-// 必应在线壁纸且尚未下载时，才提供"只下载、不改桌面"这一项
+// 在线源（必应 / Pixabay 图片 / Pixabay 视频）且尚未下载时，才提供"只下载、不改桌面"这一项
 // （已下载的再点只是白跑一趟；要操作就去「本地」选项卡）
-const canDownloadBing = computed(
-  () => store.ctxItem?.kind === "bing" && !store.isBingDownloaded(store.ctxItem)
-);
+const canDownloadOnline = computed(() => {
+  const it = store.ctxItem;
+  if (!it) return false;
+  if (it.kind === "pixabay" || it.kind === "pixabay-video") {
+    return !store.isPixabayDownloaded(it);
+  }
+  return it.kind === "bing" && !store.isBingDownloaded(it);
+});
 
 function onAction(action: string) {
   store.handleContextAction(action, store.ctxItem);
@@ -43,7 +48,7 @@ function onAction(action: string) {
         <!-- 必应在线壁纸：只下载到本地壁纸目录，不改桌面。
              放在"设为桌面壁纸"正下方 —— 这两个是该来源下的两条并列路径。 -->
         <button
-          v-if="canDownloadBing"
+          v-if="canDownloadOnline"
           class="cm-item flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px] text-tx transition-colors hover:bg-white/10"
           @click="onAction('download-bing')"
         >
@@ -51,9 +56,15 @@ function onAction(action: string) {
           下载到本地
         </button>
 
-        <!-- 收藏 / 取消收藏：书签标记，不删文件（本地/系统壁纸通用）；必应在线壁纸为远程 URL，收藏夹书签体系不适用，不显示该入口 -->
+        <!-- 收藏 / 取消收藏：书签标记，不删文件（本地/系统壁纸通用）；
+             在线源（必应 / Pixabay 图片 / Pixabay 视频）是远程 URL，
+             收藏夹书签体系不适用，不显示该入口 -->
         <button
-          v-if="store.ctxItem?.kind !== 'bing'"
+          v-if="
+            store.ctxItem?.kind !== 'bing' &&
+            store.ctxItem?.kind !== 'pixabay' &&
+            store.ctxItem?.kind !== 'pixabay-video'
+          "
           class="cm-item flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px] text-tx transition-colors hover:bg-white/10"
           @click="onAction('toggle-favorite')"
         >

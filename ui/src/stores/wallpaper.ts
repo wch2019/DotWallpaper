@@ -30,8 +30,35 @@ import {
   type BingWallpaperData,
   type DownloadedBingData,
   type BingDownloadDirInfo,
+  type PixabayDownloadDirInfo,
   type LocalFilter,
   type LocalSort,
+  PIXABAY_KEY_KEY,
+  PIXABAY_CATEGORY_KEY,
+  PIXABAY_ORDER_KEY,
+  PIXABAY_QUERY_KEY,
+  PIXABAY_PAGE_SIZE,
+  PIXABAY_MEDIA_KEY,
+  PIXABAY_IMAGE_TYPE_KEY,
+  PIXABAY_ORIENTATION_KEY,
+  PIXABAY_VIDEO_ORIENTATION_KEY,
+  PIXABAY_SIZE_KEY,
+  PIXABAY_COLORS_KEY,
+  PIXABAY_VIDEO_TYPE_KEY,
+  PIXABAY_SIZES,
+  PIXABAY_COLORS,
+  PIXABAY_VIDEO_QUALITY_KEY,
+  type PixabayMedia,
+  type PixabayImageType,
+  type PixabayOrientation,
+  type PixabaySize,
+  type PixabayVideoType,
+  type PixabayVideoQuality,
+  type PixabayWallpaperData,
+  type PixabayPageData,
+  type PixabayVideoData,
+  type PixabayVideoPageData,
+  type DownloadedPixabayData,
 } from "./wallpaper/types";
 
 // 类型、常量与纯工具函数从子模块统一再导出，调用方 import 路径保持不变
@@ -49,6 +76,147 @@ function readLocalSort(): LocalSort {
     return (LOCAL_SORTS as readonly string[]).includes(raw) ? (raw as LocalSort) : "default";
   } catch {
     return "default";
+  }
+}
+
+/// 读取用户自填的 Pixabay API key（空串 = 还没填，列表会显示引导）
+function readPixabayKey(): string {
+  try {
+    return (localStorage.getItem(PIXABAY_KEY_KEY) ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+/// 读取 Pixabay 分类偏好（空串 = 全部分类）
+function readPixabayCategory(): string {
+  try {
+    return localStorage.getItem(PIXABAY_CATEGORY_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/// 读取 Pixabay 排序偏好，非法值回退 popular
+function readPixabayOrder(): string {
+  try {
+    const raw = localStorage.getItem(PIXABAY_ORDER_KEY) ?? "";
+    return raw === "latest" || raw === "popular" ? raw : "popular";
+  } catch {
+    return "popular";
+  }
+}
+
+/// 一次性读出「媒体 + 内容类型」，并顺手完成旧值迁移。
+///
+/// ⚠️ **必须合成一个函数**：旧版本把"插画"存在**媒体键**里（值 `illustration`），
+/// 新版本媒体键只认 `image` / `video`。如果先读媒体再读内容类型、且读媒体时
+/// 顺手把键归一化成 `image`，那么 `illustration` 这个信号就永久丢失了 ——
+/// 老用户升级后"插画"会静默变回"照片"，只会觉得自己的选择莫名其妙没了。
+/// 所以两个值必须在同一次读取里都取到，再一起落盘归一化。
+function readPixabayMediaState(): { media: PixabayMedia; imageType: PixabayImageType } {
+  let media: PixabayMedia = "image";
+  let imageType: PixabayImageType = "photo";
+  try {
+    const legacy = localStorage.getItem(PIXABAY_MEDIA_KEY) ?? "";
+    media = legacy === "video" ? "video" : "image";
+    const raw = localStorage.getItem(PIXABAY_IMAGE_TYPE_KEY) ?? "";
+    if (raw === "photo" || raw === "illustration" || raw === "vector" || raw === "all") {
+      imageType = raw;
+    } else if (legacy === "illustration") {
+      // 旧版三段媒体里的"插画" → 新版的内容类型
+      imageType = "illustration";
+    }
+    // 归一化落盘：下次启动不必再猜。写失败（隐私模式）不影响本次生效。
+    localStorage.setItem(PIXABAY_MEDIA_KEY, media);
+    localStorage.setItem(PIXABAY_IMAGE_TYPE_KEY, imageType);
+  } catch {
+    /* localStorage 不可用：用默认值，本次仍可用 */
+  }
+  return { media, imageType };
+}
+
+/// 读取图像方向，默认横向（壁纸场景只吃横图，与旧版硬编码一致）
+function readPixabayOrientation(): PixabayOrientation {
+  try {
+    const raw = localStorage.getItem(PIXABAY_ORIENTATION_KEY) ?? "";
+    return raw === "vertical" || raw === "all" ? raw : "horizontal";
+  } catch {
+    return "horizontal";
+  }
+}
+
+/// 读取**视频**方向，默认横向。
+///
+/// 与图片方向分开存：竖屏视频当横屏壁纸会被裁成中间一条，但竖屏显示器上正好相反 ——
+/// 用户对两者的偏好未必一致，共用一个键会让切媒体时"方向"莫名其妙地跳。
+function readPixabayVideoOrientation(): PixabayOrientation {
+  try {
+    const raw = localStorage.getItem(PIXABAY_VIDEO_ORIENTATION_KEY) ?? "";
+    return raw === "vertical" || raw === "all" ? raw : "horizontal";
+  } catch {
+    return "horizontal";
+  }
+}
+
+/// 读取尺寸档位，默认 `"1920"`（= 旧版硬编码的 min_width=1920）。
+///
+/// **必须区分"键不存在"与"值是空串"**：空串是用户主动选的"不限"，
+/// 用 `?? ""` 会把"没存过"也当成"不限"，导致升级后图片突然多出一堆小图。
+function readPixabaySize(): PixabaySize {
+  try {
+    const raw = localStorage.getItem(PIXABAY_SIZE_KEY);
+    if (raw === null) return "1920";
+    return raw === "" || raw === "1920" || raw === "2560" || raw === "3840" ? raw : "1920";
+  } catch {
+    return "1920";
+  }
+}
+
+/// 读取已选颜色（数组）。存 JSON；任何非法值一律过滤掉而不是整体丢弃 ——
+/// 接口颜色值将来增删时，旧数据里失效的那一两个不该让其余选择一起消失。
+function readPixabayColors(): string[] {
+  try {
+    const raw = localStorage.getItem(PIXABAY_COLORS_KEY) ?? "";
+    if (!raw) return [];
+    const arr: unknown = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    const allowed = PIXABAY_COLORS.map((c) => c.value as string);
+    return arr.filter((v): v is string => typeof v === "string" && allowed.includes(v));
+  } catch {
+    return [];
+  }
+}
+
+/// 读取视频类型，默认 all
+function readPixabayVideoType(): PixabayVideoType {
+  try {
+    const raw = localStorage.getItem(PIXABAY_VIDEO_TYPE_KEY) ?? "";
+    return raw === "film" || raw === "animation" ? raw : "all";
+  } catch {
+    return "all";
+  }
+}
+
+/// 读取上次的搜索词。
+///
+/// 持久化是**有意为之**：不持久化时每次启动首屏都是全站热门杂图
+/// （见 `PIXABAY_QUERY_KEY` 的注释）。空串仍然合法 —— 那就是"随便逛逛"，
+/// 后端会走"背景类目 + 精选"的预设，不是无 q 直查。
+function readPixabayQuery(): string {
+  try {
+    return localStorage.getItem(PIXABAY_QUERY_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/// 读取视频清晰度偏好，非法值回退 medium（1080p）
+function readPixabayVideoQuality(): PixabayVideoQuality {
+  try {
+    return localStorage.getItem(PIXABAY_VIDEO_QUALITY_KEY) === "large" ? "large" : "medium";
+  } catch {
+    return "medium";
   }
 }
 
@@ -128,9 +296,76 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   // 卡片按钮据此显示"下载中"并防重复点击 —— 原图数百 KB，点两下会跑两趟网络。
   const bingDownloadingDate = ref("");
 
+  // ---- Pixabay 在线图库 ----
+  //
+  // 与必应的结构差异：必应一次把最近 16 天全给回来、更早的按月归档补；
+  // Pixabay 是**服务端分页**（每页 24 条），滚到底再拉下一页。
+  // 所以这里多一组 `pixabayPage` / `pixabayHasMore`，且 hasMore 以后端返回的
+  // `has_more` 为准 —— 不能像本地那样靠"缓冲里还剩几条"推算。
+
+  /// 用户自填的 API key（空 = 未配置，列表显示引导而不是报错）
+  const pixabayKey = ref(readPixabayKey());
+  /// 搜索词。**持久化** —— 不持久化时首屏永远是全站热门杂图，见 `readPixabayQuery`
+  const pixabayQuery = ref(readPixabayQuery());
+  const pixabayCategory = ref(readPixabayCategory());
+  const pixabayOrder = ref(readPixabayOrder());
+  /// 已加载到第几页（0 = 还没加载过）
+  const pixabayPage = ref(0);
+  /// 服务端说还有下一页
+  const pixabayHasMore = ref(false);
+  const pixabayLoading = ref(false);
+  /// true = 免费 key，只拿到 1280px（没有 full API access）
+  const pixabayDegraded = ref(false);
+  /// Pixabay 图片 id → 本地路径。对应必应的 `bingLocalPaths`，但**刻意不复用同一份**：
+  /// 两边身份键不同（id vs 日期），混在一起会让 `bingDateFromPath` 的日期正则误判。
+  const pixabayLocalPaths = ref<Record<string, string>>({});
+  /// 本地壁纸目录里确实存在的 Pixabay 图片 id（「已下载」徽标的唯一判据）
+  const pixabayDownloadedIds = ref<Set<string>>(new Set());
+  /// 正在下载的图片 id（空串 = 没有下载在进行）
+  const pixabayDownloadingId = ref("");
+
+  // ---- Pixabay 视频（同一选项卡内的另一种媒体）----
+  //
+  // 分页状态**与图片共用** `pixabayPage` / `pixabayHasMore`：同一时刻只显示一种媒体，
+  // 两套独立游标只会让"切换媒体后忘了复位"变成新的 bug 来源。
+  // 切换媒体 ⇒ 整个列表重来，这是符合直觉的（搜索结果本来就是重新搜的）。
+
+  /// 当前看的是图片还是视频（只有这两档，两者是两套接口）
+  const pixabayMediaState = readPixabayMediaState();
+  const pixabayMedia = ref<PixabayMedia>(pixabayMediaState.media);
+
+  // ---- Pixabay 筛选条件（对应网页筛选栏）----
+  //
+  // 这些**全部是服务端参数**（除了视频接口不支持的那几个，见下），
+  // 改任何一个都要复位分页重拉 —— 由各自的 setter 统一处理。
+  //
+  // ⚠️ 能力边界（实测确认，别再试）：
+  //   - `orientation` / `colors` 只有**图片**接口支持，视频接口传了会被静默忽略
+  //     ⇒ 视频模式下这两项**不展示、也不下发**（见 fetchPixabayVideoPage）
+  //   - 「发布日期」接口**根本没有对应参数**，网页上那一项做不了
+  //   - 「尺寸」只能做"至少 N×M"，接口给的是 min_width / min_height 下限，
+  //     没有精确分辨率筛选
+  const pixabayImageType = ref<PixabayImageType>(pixabayMediaState.imageType);
+  const pixabayOrientation = ref<PixabayOrientation>(readPixabayOrientation());
+  /// 视频方向。后端按宽高本地筛（视频接口没有 `orientation` 参数）。
+  const pixabayVideoOrientation = ref<PixabayOrientation>(readPixabayVideoOrientation());
+  const pixabaySize = ref<PixabaySize>(readPixabaySize());
+  const pixabayColors = ref<string[]>(readPixabayColors());
+  const pixabayVideoType = ref<PixabayVideoType>(readPixabayVideoType());
+  /// 视频清晰度偏好（设置页可改）
+  const pixabayVideoQuality = ref<PixabayVideoQuality>(readPixabayVideoQuality());
+  /// 已下载的 Pixabay **视频** id。
+  /// 与图片那份 `pixabayDownloadedIds` 刻意分开：落盘前缀不同
+  /// （`PixabayVideo_` vs `Pixabay_`），两份集合混用会让徽标互相点亮。
+  const pixabayDownloadedVideoIds = ref<Set<string>>(new Set());
+  /// Pixabay 视频 id → 本地路径（"打开所在目录"用，对应图片的 `pixabayLocalPaths`）
+  const pixabayVideoLocalPaths = ref<Record<string, string>>({});
+
   // 必应下载目录信息（设置页只读展示 + 老版本遗留目录提示）。
   // 由后端 `get_bing_download_dir_info` 填充 —— 派生规则与默认路径的真实值都在 Rust 侧。
   const bingDirInfo = ref<BingDownloadDirInfo | null>(null);
+  // Pixabay 下载目录（`<壁纸目录>\Pixabay`），同样只在设置页只读展示。
+  const pixabayDirInfo = ref<PixabayDownloadDirInfo | null>(null);
 
   // 必应**历史归档**的加载游标：下一个要拉的年月。
   //
@@ -324,6 +559,11 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     () => source.value === "local" && localTotalCount.value > 0
   );
 
+  // Pixabay 工具条（搜索框 + 分类）是否显示：只要停在该选项卡就显示。
+  // 与本地不同，这里没有"内容为空就收起"的理由 —— 搜索框本身就是
+  // "从空到有"的入口，收起等于把用户唯一的出路藏起来。
+  const showPixabayTools = computed(() => source.value === "pixabay");
+
   // ---- 右键菜单 ----
   function openContextMenu(item: WallpaperItem, x: number, y: number) {
     ctxItem.value = item;
@@ -339,7 +579,10 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     ctxReadOnly.value =
       source.value === "system" ||
       source.value === "favorites" ||
-      item.kind === "bing";
+      item.kind === "bing" ||
+      item.kind === "pixabay" ||
+      // 在线视频同样是远程资源，本地无文件；删除入口统一留在「本地」选项卡
+      item.kind === "pixabay-video";
   }
 
   function closeContextMenu() {
@@ -350,18 +593,27 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
   // ---- 后台缩略图渐进更新 ----
   // 后端列表命令不再等待全量缩略图生成：缺失项由后台线程池渐进生成，
-  // 每完成一张推送 "thumbnail-updated" { path, thumb }。命中当前列表条目时
-  // 仅更新该条 thumb（响应式触发对应 <img> :src 重算加载新图），不整列表刷新；
+  // 每完成一张推送 "thumbnail-updated" { path, thumb, duration }。命中当前列表
+  // 条目时仅更新该条 thumb（响应式触发对应 <img> :src 重算加载新图），不整列表刷新；
   // 尚未被懒加载放行的条目无需处理，放行时自然取到最新 thumb。
+  //
+  // `duration` 只有视频才有，且列表返回时通常还没探完（探测要打开文件，
+  // 绝不能进列表命令的同步路径）—— 所以时长角标是"过一会儿才出现"的，
+  // 这是设计如此，不是 bug。
   async function registerThumbnailListener() {
     if (thumbnailListenerRegistered) return;
     thumbnailListenerRegistered = true;
     await listen<ThumbnailUpdatedPayload>("thumbnail-updated", (ev) => {
-      const { path, thumb } = ev.payload;
-      if (!path || !thumb) return;
+      const { path, thumb, duration } = ev.payload;
+      if (!path) return;
       const item = gridItems.value.find((it) => it.path === path);
-      if (item && item.thumb !== thumb) {
+      if (!item) return;
+      if (thumb && item.thumb !== thumb) {
         item.thumb = thumb;
+      }
+      // 时长一旦探到就写死：0 / null 一律视为"未知"，不要覆盖掉已有的值。
+      if (duration && duration > 0 && item.duration !== duration) {
+        item.duration = duration;
       }
     });
   }
@@ -381,7 +633,10 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
   // 设置来源可见性：仅负责"隐藏当前选项卡时自动切回本地"的联动，
   // 可见性更新与持久化由 useSourceState.updateSourceVisibility 完成
-  function setSourceVisibility(key: "system" | "favorites" | "bing", visible: boolean) {
+  function setSourceVisibility(
+    key: "system" | "favorites" | "bing" | "pixabay",
+    visible: boolean
+  ) {
     updateSourceVisibility(key, visible);
     if (!visible && source.value === key) {
       void setSource("local");
@@ -392,7 +647,56 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   // 必应在线壁纸：先把原图下载到本地（目录由壁纸目录派生），再交给 set_wallpaper
   // —— Win32 SPI_SETDESKWALLPAPER 只接受本地文件路径
   async function ensureLocalPath(item: WallpaperItem): Promise<string> {
-    if (item.kind !== "bing" || !isRemoteSrc(item.path || "")) return item.path || "";
+    // 非远程地址（本地 / 系统 / 视频）原样返回，不涉及下载。
+    // ⚠️ 这里**必须先判远程再按 kind 分派**：原来写成
+    // `if (item.kind !== "bing" || !isRemoteSrc(...)) return item.path`，
+    // 加了新在线源之后，Pixabay 项会带着远程 URL 直接返回，
+    // 最后拿 `https://...` 去调 SPI_SETDESKWALLPAPER —— 必然失败且报错莫名其妙。
+    if (!isRemoteSrc(item.path || "")) return item.path || "";
+
+    // Pixabay 视频：同样按 id 下载，但落盘是 `PixabayVideo_<id>.mp4`。
+    // 注意下载下来的**一定是本地 mp4/webm** —— 动态壁纸只吃本地文件，
+    // 不能让置底窗口去播远程地址（拖慢启动、且断网就没画面）。
+    if (item.kind === "pixabay-video") {
+      const id = Number(item.onlineId || 0);
+      if (!id) throw new Error("Pixabay 视频缺少 id，无法下载");
+      const local = (await invoke("download_pixabay_video", {
+        url: item.path || "",
+        id,
+        directory: resolveDirArg(),
+      })) as string;
+      const key = String(id);
+      if (local) {
+        pixabayVideoLocalPaths.value = { ...pixabayVideoLocalPaths.value, [key]: local };
+        const next = new Set(pixabayDownloadedVideoIds.value);
+        next.add(key);
+        pixabayDownloadedVideoIds.value = next;
+      }
+      return local;
+    }
+
+    // Pixabay：按 id 下载，登记在**独立**的两份记录里
+    // （不复用必应的日期键，见 pixabayLocalPaths 的注释）
+    if (item.kind === "pixabay") {
+      const id = Number(item.onlineId || 0);
+      if (!id) throw new Error("Pixabay 图片缺少 id，无法下载");
+      const local = (await invoke("download_pixabay_wallpaper", {
+        url: item.path || "",
+        id,
+        directory: resolveDirArg(),
+      })) as string;
+      const key = String(id);
+      if (local) {
+        pixabayLocalPaths.value = { ...pixabayLocalPaths.value, [key]: local };
+        // 刚下载完的文件一定在壁纸目录里，徽标立刻点亮（不必等下一次扫描）
+        const next = new Set(pixabayDownloadedIds.value);
+        next.add(key);
+        pixabayDownloadedIds.value = next;
+      }
+      return local;
+    }
+
+    if (item.kind !== "bing") return item.path || "";
     // 下载目录不可单独配置：后端按 `<壁纸目录>\BingWallpaper` 派生，
     // 这里只需把当前壁纸目录传过去（空 = 后端用默认图片目录）
     const local = (await invoke("download_bing_wallpaper", {
@@ -438,6 +742,444 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       return false;
     } finally {
       bingDownloadingDate.value = "";
+    }
+  }
+
+  // ---- Pixabay 在线图库：列表 / 下载 / 徽标 ----
+
+  /// 后端条目 → 列表项。`onlineId` 是「已下载」徽标与"当前壁纸"回指的唯一键。
+  function pixabayToEntry(b: PixabayWallpaperData): WallpaperEntryData {
+    return {
+      path: b.url,
+      thumb: b.thumb,
+      title: b.title || "Pixabay",
+      kind: "pixabay" as WallpaperKind,
+      onlineId: String(b.id),
+      // 署名是 Pixabay API 条款的硬要求（标明作者 + 可点回主页），不是可选装饰。
+      // `user_url` 后端已保证空 user 时为空串，前端据此隐藏整块署名。
+      author: b.user || "",
+      authorUrl: b.user_url || "",
+    };
+  }
+
+  /// 后端视频条目 → 列表项。
+  ///
+  /// `path` 放**远程 URL**：列表与预览都用它（Pixabay 允许直接嵌入播放），
+  /// 只有"设为动态壁纸"时才由 `ensureLocalPath` 下载成本地文件。
+  function pixabayVideoToEntry(b: PixabayVideoData): WallpaperEntryData {
+    return {
+      path: b.url,
+      thumb: b.thumb,
+      title: b.title || "Pixabay 视频",
+      kind: "pixabay-video" as WallpaperKind,
+      onlineId: String(b.id),
+      author: b.user || "",
+      authorUrl: b.user_url || "",
+      duration: b.duration || 0,
+      quality: b.quality || "",
+      sizeBytes: b.size || 0,
+    };
+  }
+
+  /// 调后端拉一页视频（参数 camelCase / 返回 snake_case，同图片）
+  ///
+  /// ⚠️ **不要给视频下发 `colors`**：视频接口没有这个参数，传过去不报错、
+  /// 也不生效（实测确认），只会白白让缓存指纹分叉。
+  /// `orientation` 则**要下发** —— 但注意它和后端 `build_video_params` 无关：
+  /// 视频接口没有这个参数，后端拿到它之后是在**解析响应时按宽高筛**的。
+  async function fetchPixabayVideoPage(page: number): Promise<PixabayVideoPageData> {
+    const size = currentSize();
+    return (await invoke("list_pixabay_videos", {
+      key: pixabayKey.value,
+      query: pixabayQuery.value,
+      category: pixabayCategory.value || null,
+      videoType: pixabayVideoType.value,
+      orientation: pixabayVideoOrientation.value,
+      minWidth: size.w,
+      minHeight: size.h,
+      order: pixabayOrder.value,
+      // 清晰度是用户偏好；后端会在"素材没有 4K"时自动降级，
+      // 并把实际档位写回每条的 `quality`
+      quality: pixabayVideoQuality.value,
+      page,
+      perPage: PIXABAY_PAGE_SIZE,
+    })) as PixabayVideoPageData;
+  }
+
+  /// 拉一页（图片或视频，按当前媒体类型分派）。
+  ///
+  /// 抽出来是为了让 `loadWallpapers` 与 `loadMorePixabay` **只写一次分派**，
+  /// 免得两处各写一个 if、将来加第三种媒体时漏改一处。
+  async function fetchPixabayAnyPage(
+    page: number
+  ): Promise<{ entries: WallpaperEntryData[]; has_more: boolean; degraded: boolean }> {
+    if (pixabayMedia.value === "video") {
+      const vp = await fetchPixabayVideoPage(page);
+      return {
+        entries: vp.items.map(pixabayVideoToEntry),
+        has_more: vp.has_more,
+        // 视频没有页级降级标记（降级是逐条的"素材没 4K"），恒为 false
+        degraded: false,
+      };
+    }
+    const p = await fetchPixabayPage(page);
+    return { entries: p.items.map(pixabayToEntry), has_more: p.has_more, degraded: p.degraded };
+  }
+
+  /// 调后端拉一页**图片**。
+  ///
+  /// 参数用 **camelCase**（Tauri 默认把 JS 的 camelCase 映射到 Rust 的 snake_case 形参），
+  /// 返回值用 **snake_case**（serde 直接序列化，本项目结构体没有 `rename_all`）。
+  /// 两边写错都不会报错，只会静默 `undefined`。
+  /// 当前尺寸档位对应的最小宽高（`""` = 不限，返回 0/0）。
+  ///
+  /// 找不到（持久化里存了未知值）按"不限"处理而不是回退到 1920：
+  /// 未知值说明数据被外部改坏了，此时"少过滤"比"多过滤导致搜不到"更安全。
+  function currentSize(): { w: number; h: number } {
+    const hit = PIXABAY_SIZES.find((s) => s.value === pixabaySize.value);
+    return { w: hit?.w ?? 0, h: hit?.h ?? 0 };
+  }
+
+  async function fetchPixabayPage(page: number): Promise<PixabayPageData> {
+    const size = currentSize();
+    return (await invoke("list_pixabay_wallpapers", {
+      key: pixabayKey.value,
+      query: pixabayQuery.value,
+      category: pixabayCategory.value || null,
+      orientation: pixabayOrientation.value,
+      // 0 由后端当成"不筛"（`filter(|m| *m > 0)`），传 0 比传 null 少一次类型分支
+      minWidth: size.w,
+      minHeight: size.h,
+      // 多值用逗号分隔（接口原生格式）；空数组传 null 表示不筛颜色
+      colors: pixabayColors.value.length ? pixabayColors.value.join(",") : null,
+      order: pixabayOrder.value,
+      // 内容类型现在是**独立筛选**，不再由媒体种类推导。
+      // `all` 会混入照片/插画/矢量 —— 用户明确选"全部"时才这样。
+      imageType: pixabayImageType.value,
+      page,
+      perPage: PIXABAY_PAGE_SIZE,
+    })) as PixabayPageData;
+  }
+
+  /// 只下载、**不设置桌面**（对应必应的 `downloadBingWallpaper`）
+  ///
+  /// 图片与视频共用这一条：两者的差别只在 `ensureLocalPath` 里按 kind 分派，
+  /// 而"下载到本地壁纸目录、徽标立刻点亮、不重复走网络"这套语义完全一致。
+  async function downloadPixabayWallpaper(item: WallpaperItem): Promise<boolean> {
+    if (item.kind !== "pixabay" && item.kind !== "pixabay-video") return false;
+    if (isPixabayDownloaded(item)) {
+      toast("这张已经在本地壁纸目录里了", "warning");
+      return true;
+    }
+    pixabayDownloadingId.value = item.onlineId || "";
+    try {
+      const local = await ensureLocalPath(item);
+      if (!local) throw new Error("未返回本地路径");
+      toast(`已下载到本地：${baseName(local)}`, "success");
+      return true;
+    } catch (err: unknown) {
+      toast("下载失败：" + ((err as Error)?.message || String(err)), "error");
+      return false;
+    } finally {
+      pixabayDownloadingId.value = "";
+    }
+  }
+
+  /// 刷新"哪些 Pixabay 图已经在本地了"—— 与必应同一套口径（扫本地壁纸目录），
+  /// 保证徽标亮着就一定能在「本地」选项卡里找到。失败静默（徽标不显示而已）。
+  async function refreshDownloadedPixabayIds(): Promise<void> {
+    try {
+      const list = (await invoke("list_downloaded_pixabay_wallpapers", {
+        directory: resolveDirArg(),
+      })) as DownloadedPixabayData[];
+      pixabayDownloadedIds.value = new Set(list.map((d) => d.id).filter(Boolean));
+    } catch {
+      pixabayDownloadedIds.value = new Set();
+    }
+  }
+
+  /// 刷新已下载的 Pixabay **视频**（`PixabayVideo_<id>.{mp4,webm}`）。
+  /// 与图片分开一个命令与一份集合：前缀不同，混用会让徽标互相点亮。
+  async function refreshDownloadedPixabayVideoIds(): Promise<void> {
+    try {
+      const list = (await invoke("list_downloaded_pixabay_videos", {
+        directory: resolveDirArg(),
+      })) as DownloadedPixabayData[];
+      pixabayDownloadedVideoIds.value = new Set(list.map((d) => d.id).filter(Boolean));
+    } catch {
+      pixabayDownloadedVideoIds.value = new Set();
+    }
+  }
+
+  /// Pixabay 在线卡片是否"本地已下载"（左上角徽标判据）。
+  /// 图片与视频各查各的集合 —— 两者 id 可能撞号。
+  function isPixabayDownloaded(item: WallpaperItem): boolean {
+    if (!item.onlineId) return false;
+    if (item.kind === "pixabay") return pixabayDownloadedIds.value.has(item.onlineId);
+    if (item.kind === "pixabay-video")
+      return pixabayDownloadedVideoIds.value.has(item.onlineId);
+    return false;
+  }
+
+  /// 点徽标：跳到「本地」并定位到该文件。
+  ///
+  /// 搜索词带上**完整前缀**（`Pixabay_` / `PixabayVideo_`）而不是只搜 id：
+  /// 图片与视频 id 可能撞号，只搜 id 会同时命中两个文件。
+  async function openInLocalPixabay(item: WallpaperItem): Promise<void> {
+    if (!item.onlineId) return;
+    const prefix = item.kind === "pixabay-video" ? "PixabayVideo_" : "Pixabay_";
+    if (item.kind !== "pixabay" && item.kind !== "pixabay-video") return;
+    if (source.value !== "local") await setSource("local");
+    if (localFilter.value !== "all") setLocalFilter("all");
+    setLocalQuery(`${prefix}${item.onlineId}`);
+  }
+
+  /// 重置分页并重新拉第一页（改搜索词 / 分类 / 排序 / key 之后调用）
+  async function reloadPixabay(): Promise<void> {
+    pixabayPage.value = 0;
+    pixabayHasMore.value = false;
+    await loadWallpapers();
+  }
+
+  function setPixabayKey(next: string) {
+    const v = next.trim();
+    if (pixabayKey.value === v) return;
+    pixabayKey.value = v;
+    try {
+      localStorage.setItem(PIXABAY_KEY_KEY, v);
+    } catch {
+      /* localStorage 不可用时静默降级：本次仍生效，只是不持久化 */
+    }
+  }
+
+  async function setPixabayQuery(next: string) {
+    if (pixabayQuery.value === next) return;
+    pixabayQuery.value = next;
+    try {
+      localStorage.setItem(PIXABAY_QUERY_KEY, next);
+    } catch {
+      /* ignore */
+    }
+    if (source.value === "pixabay") await reloadPixabay();
+  }
+
+  async function setPixabayCategory(next: string) {
+    if (pixabayCategory.value === next) return;
+    pixabayCategory.value = next;
+    try {
+      localStorage.setItem(PIXABAY_CATEGORY_KEY, next);
+    } catch {
+      /* ignore */
+    }
+    if (source.value === "pixabay") await reloadPixabay();
+  }
+
+  async function setPixabayOrder(next: string) {
+    if (pixabayOrder.value === next) return;
+    pixabayOrder.value = next;
+    try {
+      localStorage.setItem(PIXABAY_ORDER_KEY, next);
+    } catch {
+      /* ignore */
+    }
+    if (source.value === "pixabay") await reloadPixabay();
+  }
+
+  /// 切换"图片 / 视频"。**整个列表重来** —— 两者是两套接口，
+  /// 结果不能拼接，分页游标也必须复位（否则视频第一页会接在图片第 3 页后面）。
+  async function setPixabayMedia(next: PixabayMedia) {
+    if (pixabayMedia.value === next) return;
+    pixabayMedia.value = next;
+    try {
+      localStorage.setItem(PIXABAY_MEDIA_KEY, next);
+    } catch {
+      /* ignore */
+    }
+    if (source.value === "pixabay") await reloadPixabay();
+  }
+
+  // ---- Pixabay 筛选条件的 setter ----
+  //
+  // 全部遵循同一个套路：值没变直接返回（避免重复拉取）→ 写 localStorage →
+  // 必要时复位分页重拉。**每个新筛选都必须在这里落一份持久化**，
+  // 漏了不报错，只表现为"重启后筛选被重置"。
+
+  /// 内容类型（照片/插画/矢量/全部）。仅图片模式有意义 ——
+  /// 视频模式下改它不必重拉（请求里根本没有这个参数）。
+  async function setPixabayImageType(next: PixabayImageType) {
+    if (pixabayImageType.value === next) return;
+    pixabayImageType.value = next;
+    try {
+      localStorage.setItem(PIXABAY_IMAGE_TYPE_KEY, next);
+    } catch {
+      /* ignore */
+    }
+    if (source.value === "pixabay" && pixabayMedia.value === "image") {
+      await reloadPixabay();
+    }
+  }
+
+  /// 图像方向。**仅图片接口支持**，视频模式不重拉。
+  async function setPixabayOrientation(next: PixabayOrientation) {
+    if (pixabayOrientation.value === next) return;
+    pixabayOrientation.value = next;
+    try {
+      localStorage.setItem(PIXABAY_ORIENTATION_KEY, next);
+    } catch {
+      /* ignore */
+    }
+    if (source.value === "pixabay" && pixabayMedia.value === "image") {
+      await reloadPixabay();
+    }
+  }
+
+  /// 尺寸档位。图片与视频接口都支持，两种模式下都要重拉。
+  async function setPixabaySize(next: PixabaySize) {
+    if (pixabaySize.value === next) return;
+    pixabaySize.value = next;
+    try {
+      localStorage.setItem(PIXABAY_SIZE_KEY, next);
+    } catch {
+      /* ignore */
+    }
+    if (source.value === "pixabay") await reloadPixabay();
+  }
+
+  /// 颜色（多选）。**仅图片接口支持**，视频模式不重拉。
+  async function setPixabayColors(next: string[]) {
+    // 数组要按内容比，不能按引用比 —— 传进来的通常是新建的数组
+    const a = pixabayColors.value.join(",");
+    const b = next.join(",");
+    if (a === b) return;
+    pixabayColors.value = next;
+    try {
+      localStorage.setItem(PIXABAY_COLORS_KEY, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
+    if (source.value === "pixabay" && pixabayMedia.value === "image") {
+      await reloadPixabay();
+    }
+  }
+
+  /// 视频类型（实拍/动画/全部）。仅视频模式有意义。
+  async function setPixabayVideoType(next: PixabayVideoType) {
+    if (pixabayVideoType.value === next) return;
+    pixabayVideoType.value = next;
+    try {
+      localStorage.setItem(PIXABAY_VIDEO_TYPE_KEY, next);
+    } catch {
+      /* ignore */
+    }
+    if (source.value === "pixabay" && pixabayMedia.value === "video") {
+      await reloadPixabay();
+    }
+  }
+
+  /// 视频方向。仅视频模式有意义（图片方向是另一个 setter）。
+  async function setPixabayVideoOrientation(next: PixabayOrientation) {
+    if (pixabayVideoOrientation.value === next) return;
+    pixabayVideoOrientation.value = next;
+    try {
+      localStorage.setItem(PIXABAY_VIDEO_ORIENTATION_KEY, next);
+    } catch {
+      /* ignore */
+    }
+    if (source.value === "pixabay" && pixabayMedia.value === "video") {
+      await reloadPixabay();
+    }
+  }
+
+  /// 把筛选面板里的条件恢复默认（**不动搜索词与媒体种类**）。
+  ///
+  /// 一次性写全部字段再**只重拉一次** —— 逐个调 setter 会触发 N 次重拉，
+  /// 用户会看到列表连续闪好几下。
+  async function resetPixabayFilters() {
+    pixabayCategory.value = "";
+    pixabayImageType.value = "photo";
+    pixabayOrientation.value = "horizontal";
+    pixabayVideoOrientation.value = "horizontal";
+    pixabaySize.value = "1920";
+    pixabayColors.value = [];
+    pixabayVideoType.value = "all";
+    try {
+      localStorage.setItem(PIXABAY_CATEGORY_KEY, "");
+      localStorage.setItem(PIXABAY_IMAGE_TYPE_KEY, "photo");
+      localStorage.setItem(PIXABAY_ORIENTATION_KEY, "horizontal");
+      localStorage.setItem(PIXABAY_VIDEO_ORIENTATION_KEY, "horizontal");
+      localStorage.setItem(PIXABAY_SIZE_KEY, "1920");
+      localStorage.setItem(PIXABAY_COLORS_KEY, "[]");
+      localStorage.setItem(PIXABAY_VIDEO_TYPE_KEY, "all");
+    } catch {
+      /* ignore */
+    }
+    if (source.value === "pixabay") await reloadPixabay();
+  }
+
+  /// 筛选按钮上的角标数字：**偏离默认值**的项数。
+  ///
+  /// 默认值（照片/横向/1920）是应用的基线口径，不是"用户选的条件" ——
+  /// 把它们算进去会让角标一开始就显示 3，等于告诉用户"你筛了东西"，是误导。
+  /// 按当前媒体种类统计：视频模式下面板里根本没有内容类型/方向/颜色三项。
+  const pixabayFilterCount = computed(() => {
+    let n = 0;
+    if (pixabayCategory.value) n += 1;
+    if (pixabaySize.value !== "1920") n += 1;
+    if (pixabayMedia.value === "video") {
+      if (pixabayVideoType.value !== "all") n += 1;
+      if (pixabayVideoOrientation.value !== "horizontal") n += 1;
+    } else {
+      if (pixabayImageType.value !== "photo") n += 1;
+      if (pixabayOrientation.value !== "horizontal") n += 1;
+      if (pixabayColors.value.length) n += 1;
+    }
+    return n;
+  });
+
+  /// 改视频清晰度偏好。只在视频模式下需要重拉 ——
+  /// 图片列表里没有档位这个概念，无谓地清空重来只会闪一下。
+  async function setPixabayVideoQuality(next: PixabayVideoQuality) {
+    if (pixabayVideoQuality.value === next) return;
+    pixabayVideoQuality.value = next;
+    try {
+      localStorage.setItem(PIXABAY_VIDEO_QUALITY_KEY, next);
+    } catch {
+      /* ignore */
+    }
+    if (source.value === "pixabay" && pixabayMedia.value === "video") {
+      await reloadPixabay();
+    }
+  }
+
+  /// 拉下一页并追加（服务端分页，与必应的"归档往前翻一个月"是两件事）。
+  /// 图片与视频共用这一条，靠 `fetchPixabayAnyPage` 分派。
+  async function loadMorePixabay(): Promise<void> {
+    if (pixabayLoading.value || !pixabayHasMore.value) return;
+    pixabayLoading.value = true;
+    try {
+      const next = pixabayPage.value + 1;
+      const page = await fetchPixabayAnyPage(next);
+      pixabayPage.value = next;
+      pixabayHasMore.value = page.has_more;
+      pixabayDegraded.value = page.degraded;
+      if (!page.entries.length) {
+        // 服务端说还有但这一页是空的：直接收手，否则前端会一直转圈
+        pixabayHasMore.value = false;
+        return;
+      }
+      allEntries = allEntries.concat(page.entries);
+      rawEntries = allEntries;
+      allCount.value = allEntries.length;
+      appendBatch(); // 只渲染 PAGE_SIZE 条，其余留给下一次滚动
+    } catch (err: unknown) {
+      toast(
+        `加载更多 Pixabay ${pixabayMedia.value === "video" ? "视频" : "图片"}失败：` +
+          ((err as Error)?.message || String(err)),
+        "error"
+      );
+      pixabayHasMore.value = false;
+    } finally {
+      pixabayLoading.value = false;
     }
   }
 
@@ -547,6 +1289,19 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     }
   }
 
+  /// 刷新 Pixabay 下载目录（`<壁纸目录>\Pixabay`），设置页只读展示用。
+  /// 与 `refreshBingDirInfo` 分开两个命令：Pixabay 没有老版本遗留目录，
+  /// 不需要传 `legacyDir` 也不需要扫第二个目录，硬塞进必应那个结构体只会让字段半空。
+  async function refreshPixabayDirInfo(): Promise<void> {
+    try {
+      pixabayDirInfo.value = (await invoke("get_pixabay_download_dir_info", {
+        directory: resolveDirArg(),
+      })) as PixabayDownloadDirInfo;
+    } catch {
+      pixabayDirInfo.value = null;
+    }
+  }
+
   // 点徽标：跳到「本地」选项卡并定位到那张文件。
   //
   // 用**搜索词定位**而不是滚动定位：分页是 12 张/页、`loadMore` 还有 200ms 防抖，
@@ -564,11 +1319,15 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   // （必应项 path 为远程 URL，需经下载记录比对；本地项直接比对路径）
   // 视频项走动态壁纸状态判定（isCurrentVideo），不参与静态壁纸路径比对
   function isCurrentItem(item: WallpaperItem): boolean {
-    if (item.kind === "video") return isCurrentVideo(item);
+    if (item.kind === "video" || item.kind === "pixabay-video") return isCurrentVideo(item);
     const cur = currentWallpaper.value;
     if (!cur?.path) return false;
     if (item.kind === "bing") {
       const local = item.date ? bingLocalPaths.value[item.date] : "";
+      return !!local && local === cur.path;
+    }
+    if (item.kind === "pixabay") {
+      const local = item.onlineId ? pixabayLocalPaths.value[item.onlineId] : "";
       return !!local && local === cur.path;
     }
     return !!item.path && item.path === cur.path;
@@ -623,6 +1382,30 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     // 视频动态壁纸：后端创建置底 WebView 窗口播放，与静态壁纸是两条独立路径
     if (item.kind === "video") {
       return setVideoWallpaper(path);
+    }
+    // Pixabay 在线视频：**先下载到本地再设**。
+    //
+    // 不能让置底窗口直接播远程地址：启动会等网络、断网就没画面，
+    // 而且 Pixabay 的 API 条款也不鼓励把它的 CDN 当长期播放源。
+    //
+    // 这里必须先把 isApplying 清掉再调 setVideoWallpaper —— 它开头有
+    // `if (isApplying.value) return false`，不清就会静默什么都不做。
+    if (item.kind === "pixabay-video") {
+      isApplying.value = true;
+      let local = "";
+      try {
+        local = await ensureLocalPath(item);
+      } catch (err: unknown) {
+        toast("视频下载失败：" + ((err as Error)?.message || String(err)), "error");
+        return false;
+      } finally {
+        isApplying.value = false;
+      }
+      if (!local) {
+        toast("视频下载失败，无法设为动态壁纸", "error");
+        return false;
+      }
+      return setVideoWallpaper(local);
     }
     isApplying.value = true;
     try {
@@ -852,6 +1635,30 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
         bingArchiveEnd.value = false;
         // 徽标数据在列表就位之后再取：它失败只该影响徽标，不该让整个列表报错
         await refreshDownloadedBingDates();
+      } else if (source.value === "pixabay") {
+        // Pixabay 在线图库 = 服务端分页（每页 24 条），图片与视频共用这套分页。
+        //
+        // 没有 key 时**不发请求、也不报错** —— 空态里会显示"去填 key"的引导，
+        // 再弹一个红色 toast 只会让人以为功能坏了。
+        pixabayPage.value = 0;
+        pixabayHasMore.value = false;
+        if (!pixabayKey.value.trim()) {
+          allEntries = [];
+          pixabayDegraded.value = false;
+        } else {
+          const page = await fetchPixabayAnyPage(1);
+          allEntries = page.entries;
+          pixabayPage.value = 1;
+          pixabayHasMore.value = page.has_more;
+          pixabayDegraded.value = page.degraded;
+          // 徽标数据在列表就位之后再取：它失败只该影响徽标，不该让列表报错。
+          // 只刷当前媒体那一份 —— 另一份在切过去时自然会刷。
+          if (pixabayMedia.value === "video") {
+            await refreshDownloadedPixabayVideoIds();
+          } else {
+            await refreshDownloadedPixabayIds();
+          }
+        }
       } else {
         allEntries = (await invoke("list_local_wallpapers", {
           directory: resolveDirArg(),
@@ -903,6 +1710,20 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
         title: e.title || baseName(e.path),
         thumb: e.thumb || undefined,
         date: e.date,
+        // ⚠️ 在线源的附加字段**必须在这里逐项搬运**：这个对象是新建的，
+        // 漏一个就静默变 undefined，而且不会报错 ——
+        // 漏 onlineId ⇒ 下载时抛"缺少 id"、徽标永远不亮；
+        // 漏 author/authorUrl ⇒ 卡片上没有署名（Pixabay 条款要求）。
+        onlineId: e.onlineId,
+        author: e.author,
+        authorUrl: e.authorUrl,
+        // 在线视频的附加字段，同理必须逐项搬运：
+        // 漏 duration ⇒ 卡片上没有时长角标；
+        // 漏 quality ⇒ 预览区无法提示"4K 不可用已降级"；
+        // 漏 sizeBytes ⇒ 无法提示这条要下多少 MB。
+        duration: e.duration,
+        quality: e.quality,
+        sizeBytes: e.sizeBytes,
       });
       loadedCount++;
     });
@@ -911,7 +1732,9 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     // 底部会错误显示"已加载全部"，`fillGridUntilOverflow` 也会提前收手不再拉归档。
     hasMore.value =
       loadedCount < allEntries.length ||
-      (source.value === "bing" && !bingArchiveEnd.value && bingArchiveCursor.value !== null);
+      (source.value === "bing" && !bingArchiveEnd.value && bingArchiveCursor.value !== null) ||
+      // Pixabay 是服务端分页：缓冲渲染完后还有没有下一页，只有后端知道
+      (source.value === "pixabay" && pixabayHasMore.value);
   }
 
   async function loadMore() {
@@ -922,6 +1745,18 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       loadingMore.value = true;
       try {
         await loadMoreBingArchive();
+      } finally {
+        loadingMoreLock = false;
+        loadingMore.value = false;
+      }
+      return;
+    }
+    // Pixabay：本地缓冲渲染完 ⇒ 向服务端要下一页（与必应的"归档往前翻"不同）
+    if (source.value === "pixabay" && loadedCount >= allEntries.length && pixabayHasMore.value) {
+      loadingMoreLock = true;
+      loadingMore.value = true;
+      try {
+        await loadMorePixabay();
       } finally {
         loadingMoreLock = false;
         loadingMore.value = false;
@@ -1308,12 +2143,18 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
   // 某项是否为"当前正在播放的动态壁纸"（列表绿框 / 右侧状态展示共用）
   function isCurrentVideo(item: WallpaperItem): boolean {
-    return (
-      item.kind === "video" &&
-      videoWallpaper.value.enabled &&
-      !!item.path &&
-      item.path === videoWallpaper.value.path
-    );
+    if (!videoWallpaper.value.enabled) return false;
+    const playing = videoWallpaper.value.path;
+    if (!playing) return false;
+    if (item.kind === "video") return !!item.path && item.path === playing;
+    // 在线视频：卡片上存的是**远程 URL**，而桌面播的是**下载后的本地文件**，
+    // 直接比 path 永远不相等 —— 绿点就永远不亮，用户以为没设上。
+    // 必须经下载记录换算一次（与必应 / Pixabay 图片"绿框"的判据同一套思路）。
+    if (item.kind === "pixabay-video") {
+      const local = item.onlineId ? pixabayVideoLocalPaths.value[item.onlineId] : "";
+      return !!local && local === playing;
+    }
+    return false;
   }
 
   // 启动/恢复主界面时同步动态壁纸状态（播放页挂载也用它拉取兜底）
@@ -1510,16 +2351,23 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
       return;
     }
 
-    // 只下载到本地壁纸目录，不改变桌面（必应在线壁纸专用）
+    // 只下载到本地壁纸目录，不改变桌面（必应 / Pixabay 在线图片 / 在线视频专用）
     if (action === "download-bing") {
       if (item.kind === "bing") await downloadBingWallpaper(item);
+      else if (item.kind === "pixabay" || item.kind === "pixabay-video") {
+        await downloadPixabayWallpaper(item);
+      }
       return;
     }
 
-    if (action === "toggle-favorite") {      // 收藏夹以本地文件路径为书签，必应选项卡不参与该体系
+    if (action === "toggle-favorite") {      // 收藏夹以本地文件路径为书签，在线源不参与该体系
       //（下载后的文件在「本地」选项卡里可正常收藏）
-      if (item.kind === "bing") {
-        toast("必应壁纸暂不支持收藏", "warning");
+      if (
+        item.kind === "bing" ||
+        item.kind === "pixabay" ||
+        item.kind === "pixabay-video"
+      ) {
+        toast("在线壁纸暂不支持收藏", "warning");
         return;
       }
       // 收藏 / 取消收藏：仅书签标记，不删文件
@@ -1531,18 +2379,28 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
     if (action === "reveal-folder") {
       // 在系统资源管理器中打开文件所在目录并定位（本地/系统壁纸通用）。
-      // 必应分两种：在线项要先查下载记录（未下载则给引导提示）；
+      // 在线源分两种：在线项要先查下载记录（未下载则给引导提示）；
       // 本地缓存项（超出在线窗口的老壁纸）item.path 本身就是本地文件，直接定位。
       const localPath =
         item.kind === "bing"
           ? (item.date && bingLocalPaths.value[item.date]) ||
             (!isRemoteSrc(item.path || "") ? item.path || "" : "")
-          : item.path || "";
+          : item.kind === "pixabay"
+            ? (item.onlineId && pixabayLocalPaths.value[item.onlineId]) ||
+              (!isRemoteSrc(item.path || "") ? item.path || "" : "")
+            : item.kind === "pixabay-video"
+              ? (item.onlineId && pixabayVideoLocalPaths.value[item.onlineId]) ||
+                (!isRemoteSrc(item.path || "") ? item.path || "" : "")
+              : item.path || "";
       if (!localPath) {
+        // ⚠️ 在线项不能直接拿 `item.path` 去 reveal —— 那是 `https://...`，
+        // 传给 reveal_in_explorer 只会得到一个莫名其妙的"打开目录失败"
         toast(
           item.kind === "bing"
             ? "这张还没下载到本地，先点卡片上的「下载」存到壁纸目录"
-            : "当前壁纸无本地路径",
+            : item.kind === "pixabay"
+              ? "这张还没下载到本地，先点卡片上的「下载」存到壁纸目录"
+              : "当前壁纸无本地路径",
           "warning"
         );
         return;
@@ -1557,9 +2415,9 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
 
     if (action === "delete-wallpaper" && item.kind !== "current") {
       // 系统壁纸来源只读：纵深防御，禁止进入删除流程；
-      // 必应选项卡同样不提供删除（在线项本地无文件；本地缓存项的删除入口
-      // 统一留在「本地」选项卡，避免同一文件两处可删）
-      if (source.value === "system" || item.kind === "bing") return;
+      // 在线源（必应 / Pixabay）选项卡同样不提供删除（在线项本地无文件；
+      // 本地缓存项的删除入口统一留在「本地」选项卡，避免同一文件两处可删）
+      if (source.value === "system" || item.kind === "bing" || item.kind === "pixabay") return;
       await removeWallpaper(item);
     }
   }
@@ -1626,15 +2484,34 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     localVideoCount,
     localTotalCount,
     bingDirInfo,
+    pixabayDirInfo,
     bingDownloadingDate,
+    pixabayKey,
+    pixabayQuery,
+    pixabayCategory,
+    pixabayOrder,
+    pixabayDegraded,
+    pixabayLoading,
+    pixabayDownloadingId,
+    pixabayMedia,
+    pixabayImageType,
+    pixabayOrientation,
+    pixabayVideoOrientation,
+    pixabaySize,
+    pixabayColors,
+    pixabayVideoType,
+    pixabayVideoQuality,
     // getters
     hasMore,
     previewTarget,
     showLocalFilter,
     showLocalTools,
+    showPixabayTools,
+    pixabayFilterCount,
     isCurrentItem,
     isCurrentVideo,
     isBingDownloaded,
+    isPixabayDownloaded,
     videoWallpaper,
     videoMuted,
     // 播放参数四个 ref **必须导出**：面板要读它们做高亮、摘要与片段输入框回填。
@@ -1661,7 +2538,24 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     selectItem,
     openInLocal,
     downloadBingWallpaper,
+    downloadPixabayWallpaper,
+    openInLocalPixabay,
+    setPixabayKey,
+    setPixabayQuery,
+    setPixabayCategory,
+    setPixabayOrder,
+    setPixabayMedia,
+    setPixabayImageType,
+    setPixabayOrientation,
+    setPixabayVideoOrientation,
+    setPixabaySize,
+    setPixabayColors,
+    setPixabayVideoType,
+    resetPixabayFilters,
+    setPixabayVideoQuality,
+    reloadPixabay,
     refreshBingDirInfo,
+    refreshPixabayDirInfo,
     loadFavorites,
     isFavorite,
     toggleFavorite,

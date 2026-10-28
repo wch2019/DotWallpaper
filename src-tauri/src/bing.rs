@@ -17,7 +17,7 @@
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use crate::resolve_save_dir;
+use crate::{http, resolve_save_dir};
 
 /// 必应壁纸归档接口（n 上限 8，通过 idx 分批取更多历史）
 const API_TMPL: &str = "https://www.bing.com/HPImageArchive.aspx?format=js&idx={idx}&n=8&mkt=zh-CN";
@@ -53,26 +53,6 @@ pub struct BingWallpaper {
     pub url: String,
     /// 400x240 缩略图 URL（列表展示用）
     pub thumb: String,
-}
-
-/// 统一的阻塞式 GET（复用连接池，带超时与 UA，避免被必应拦截）
-fn http_get(url: &str) -> Result<reqwest::blocking::Response, String> {
-    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
-    let client = CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(20))
-            // 默认 UA 会被必应返回 403，伪装成浏览器 UA
-            .user_agent(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-            )
-            .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new())
-    });
-    client
-        .get(url)
-        .send()
-        .map_err(|e| format!("请求必应壁纸接口失败：{e}"))
 }
 
 /// 把 1920x1080 原图 URL 改写为 400x240 缩略图 URL（失败时回退原 URL）
@@ -150,7 +130,7 @@ fn parse_images(json: &serde_json::Value) -> Vec<BingWallpaper> {
 /// 拉取单批壁纸（idx 为起始偏移）
 fn fetch_batch(idx: usize) -> Result<Vec<BingWallpaper>, String> {
     let url = API_TMPL.replace("{idx}", &idx.to_string());
-    let resp = http_get(&url)?;
+    let resp = http::get(&url, "必应壁纸")?;
     if !resp.status().is_success() {
         return Err(format!("必应壁纸接口返回 HTTP {}", resp.status()));
     }
@@ -204,7 +184,7 @@ pub fn fetch_archive_month(year: u32, month: u32) -> Result<Vec<BingWallpaper>, 
     let mut last_err = String::from("归档源不可用");
     for base in ARCHIVE_BASES {
         let url = format!("{base}{path}");
-        let resp = match http_get(&url) {
+        let resp = match http::get(&url, "必应壁纸归档源") {
             Ok(r) => r,
             Err(e) => {
                 last_err = e;
@@ -256,7 +236,7 @@ pub fn download_wallpaper(url: &str, date: &str, dir: &Path) -> Result<String, S
         return Ok(normalize(&dest));
     }
 
-    let resp = http_get(url)?;
+    let resp = http::get(url, "必应壁纸")?;
     if !resp.status().is_success() {
         return Err(format!("下载必应壁纸失败：HTTP {}", resp.status()));
     }

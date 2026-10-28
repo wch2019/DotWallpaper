@@ -5,7 +5,8 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import type { Component } from "vue";
 import { NIcon, NInput, NSelect } from "naive-ui";
-import { AlertTriangle, Check, Download, Globe, Layers, Monitor, Play, Search, Star } from "lucide-vue-next";
+import { AlertTriangle, Check, Download, Globe, Layers, Monitor, Play, Plus, Search, SlidersHorizontal, Sparkles, Star } from "lucide-vue-next";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import defaultJpg from '../assets/images/default.jpg'
 import { toast } from "../lib/naive-host";
 import {
@@ -13,23 +14,68 @@ import {
   isWebviewPlayable,
   thumbSrc,
   useWallpaperStore,
+  PIXABAY_CATEGORIES,
+  PIXABAY_ORDERS,
+  PIXABAY_IMAGE_TYPES,
+  PIXABAY_ORIENTATIONS,
+  PIXABAY_SIZES,
+  PIXABAY_COLORS,
+  PIXABAY_VIDEO_TYPES,
   type WallpaperItem,
   type WallpaperSource,
   type LocalFilter,
   type LocalSort,
+  type PixabayImageType,
+  type PixabayOrientation,
+  type PixabaySize,
+  type PixabayVideoType,
 } from "../stores/wallpaper";
 
 const store = useWallpaperStore();
 
+// Pixabay 下拉选项：常量是 `as const` 元组，NSelect 需要可变的 SelectOption[]，
+// 这里转一次（不直接改常量，是为了让常量保持字面量类型供别处使用）
+const PIXABAY_CATEGORY_OPTIONS = PIXABAY_CATEGORIES.map((c) => ({ label: c.label, value: c.value }));
+const PIXABAY_ORDER_OPTIONS = PIXABAY_ORDERS.map((o) => ({ label: o.label, value: o.value }));
+
+/// Pixabay 媒体种类分段选项。
+///
+/// **只有两档：图片 / 视频** —— 这是唯一必须分叉的维度（两套接口）。
+/// "照片 / 插画 / 矢量" 是**内容类型**，已经下沉到筛选浮层里
+/// （对应 Pixabay 网页的「内容类型」下拉）。
+///
+/// ⚠️ 历史：早先这里是"照片 / 插画 / 视频"三段，把插画当媒体种类。
+/// 改成网页那套筛选体系后，插画必须能在浮层的「内容类型」里一眼找到 ——
+/// 它是壁纸感最强的一类（赛博朋克霓虹街道、天际线剪影 vs 素材库实拍），
+/// 别再把它塞回分类下拉里。
+const PIXABAY_MEDIA_OPTIONS = [
+  { label: "图片", value: "image" as const, title: "搜索 Pixabay 图片" },
+  {
+    label: "视频",
+    value: "video" as const,
+    title: "搜索 Pixabay 视频（先预览，设为动态壁纸时才下载）",
+  },
+];
+
+// 浮层面板里各个下拉的选项（常量是 `as const` 元组，NSelect 需要可变数组）
+const IMAGE_TYPE_OPTIONS = PIXABAY_IMAGE_TYPES.map((o) => ({ label: o.label, value: o.value }));
+const ORIENTATION_OPTIONS = PIXABAY_ORIENTATIONS.map((o) => ({ label: o.label, value: o.value }));
+const SIZE_OPTIONS = PIXABAY_SIZES.map((o) => ({ label: o.label, value: o.value }));
+const VIDEO_TYPE_OPTIONS = PIXABAY_VIDEO_TYPES.map((o) => ({ label: o.label, value: o.value }));
+
 // 各来源选项卡元信息：图标与文案（渲染顺序由 store.sourceOrder 决定）
+//
+// `menuLabel` 只给「添加来源」浮层用：页签里「系统」「必应」够用（有上下文），
+// 但浮层里单独一个「系统」容易被读成"系统设置"，所以那里换成完整名称。
 const sourceTabMeta: Record<
   WallpaperSource,
-  { label: string; icon: Component }
+  { label: string; icon: Component; menuLabel?: string }
 > = {
   local: { label: "本地", icon: Layers },
-  system: { label: "系统", icon: Monitor },
+  system: { label: "系统", icon: Monitor, menuLabel: "系统壁纸" },
   favorites: { label: "收藏", icon: Star },
-  bing: { label: "必应", icon: Globe },
+  bing: { label: "必应", icon: Globe, menuLabel: "必应壁纸" },
+  pixabay: { label: "Pixabay", icon: Sparkles, menuLabel: "Pixabay 图库" },
 };
 
 // 按用户配置顺序 + 可见性过滤后实际渲染的选项卡列表
@@ -39,6 +85,105 @@ const visibleSourceTabs = computed(() =>
     .filter((key) => key === "local" || store.sourceVisibility[key])
     .map((key) => ({ key, ...sourceTabMeta[key] }))
 );
+
+/// 仍处于隐藏状态的来源（不含 local）。
+///
+/// 「添加来源」入口据此决定**是否出现**，所以全部开启后按钮会自己消失。
+/// 顺序跟随 `sourceOrder`，用户在设置里排过序后这里也是同一顺序。
+const hiddenSources = computed(() =>
+  store.sourceOrder
+    .filter(
+      (key): key is Exclude<WallpaperSource, "local"> =>
+        key !== "local" && !store.sourceVisibility[key]
+    )
+    .map((key) => ({
+      key,
+      icon: sourceTabMeta[key].icon,
+      label: sourceTabMeta[key].menuLabel ?? sourceTabMeta[key].label,
+    }))
+);
+
+// ---- 「添加来源」小浮层 ----
+//
+// 为什么要有它：默认只开「本地 + 收藏」，其余来源的开关藏在设置里，
+// 新用户根本不知道还有必应 / Pixabay。页签条末尾放一个低调的 ＋，
+// 点开只列**当前隐藏**的来源，点一行即开启。
+//
+// 之所以"只列隐藏的 + 全开时按钮消失"，是为了顺带解决宽度预算：
+// 5 个页签全开时标签条已经吃掉约 322px（见下方注释），再加一个常驻按钮
+// 就会顶破最小窗口 800px 的 396px 容器。
+const srcMenuOpen = ref(false);
+const srcMenuBtn = ref<HTMLElement | null>(null);
+const srcMenuEl = ref<HTMLElement | null>(null);
+const srcMenuStyle = ref<Record<string, string>>({ left: "0px", top: "0px" });
+/// 浮层宽度。**改这里必须同步模板里的 width 绑定**（样式是内联算出来的）。
+const SRC_MENU_WIDTH = 172;
+
+function toggleSrcMenu() {
+  if (srcMenuOpen.value) {
+    srcMenuOpen.value = false;
+    return;
+  }
+  const btn = srcMenuBtn.value;
+  if (!btn) return;
+  const r = btn.getBoundingClientRect();
+  // 左对齐按钮；万一超出右边界就往回收（页签条在最左栏，正常不会触发）
+  let left = r.left;
+  const maxLeft = window.innerWidth - VIEWPORT_PAD - SRC_MENU_WIDTH;
+  if (left > maxLeft) left = Math.max(VIEWPORT_PAD, maxLeft);
+  if (left < VIEWPORT_PAD) left = VIEWPORT_PAD;
+  srcMenuStyle.value = {
+    left: `${Math.round(left)}px`,
+    top: `${Math.round(r.bottom + PANEL_GAP)}px`,
+    width: `${SRC_MENU_WIDTH}px`,
+  };
+  srcMenuOpen.value = true;
+}
+
+/// 点一行就开启该来源。
+///
+/// 最后一个隐藏来源被开启后，`hiddenSources` 变空 ⇒ ＋ 按钮消失 ⇒
+/// 浮层失去锚点。必须顺手关掉，否则会留下一个"飘在原处、再也点不到按钮关"的浮层。
+function enableSource(key: Exclude<WallpaperSource, "local">) {
+  store.setSourceVisibility(key, true);
+  if (!hiddenSources.value.length) srcMenuOpen.value = false;
+}
+
+/// 点浮层与 ＋ 以外的地方收起。用 `pointerdown` 捕获阶段，理由同筛选浮层。
+/// 浮层里只有普通 button（没有 NSelect），所以不需要 `menu-props` 那套放行。
+function onSrcMenuOutside(e: PointerEvent) {
+  const t = e.target as Node | null;
+  if (!t) return;
+  if (srcMenuEl.value?.contains(t)) return;
+  if (srcMenuBtn.value?.contains(t)) return;
+  srcMenuOpen.value = false;
+}
+
+function onSrcMenuEsc(e: KeyboardEvent) {
+  if (e.key === "Escape") srcMenuOpen.value = false;
+}
+
+function onSrcMenuResize() {
+  srcMenuOpen.value = false;
+}
+
+watch(srcMenuOpen, (open) => {
+  if (open) {
+    document.addEventListener("pointerdown", onSrcMenuOutside, true);
+    document.addEventListener("keydown", onSrcMenuEsc);
+    window.addEventListener("resize", onSrcMenuResize);
+  } else {
+    document.removeEventListener("pointerdown", onSrcMenuOutside, true);
+    document.removeEventListener("keydown", onSrcMenuEsc);
+    window.removeEventListener("resize", onSrcMenuResize);
+  }
+});
+
+onUnmounted(() => {
+  document.removeEventListener("pointerdown", onSrcMenuOutside, true);
+  document.removeEventListener("keydown", onSrcMenuEsc);
+  window.removeEventListener("resize", onSrcMenuResize);
+});
 
 // 本地来源的类型筛选选项：全部 / 图片 / 视频
 // 纯筛选项，不展示计数（计数交给列表底部的"已加载全部 N 项"）
@@ -70,6 +215,48 @@ const LOCAL_SORT_OPTIONS: { label: string; value: LocalSort }[] = [
   { label: "文件小→大", value: "size-asc" },
 ];
 
+/// 当前生效的筛选条件摘要（如「插画 · 竖向 · 蓝色 · ≥3840×2160」）。
+///
+/// 为什么要有它：筛选全部收进浮层后，面板一关就看不见当前筛了什么，
+/// 用户会对着"结果怎么这么少"发愣。挂在底部页脚的小字上，等于给筛选面板
+/// 一个常驻的"当前状态"回显，也顺带让「插画」这类选项不因为收进浮层而消失。
+const pixabayFilterSummary = computed(() => {
+  const parts: string[] = [];
+  const cat = PIXABAY_CATEGORIES.find((c) => c.value === store.pixabayCategory);
+  if (cat && cat.value) parts.push(cat.label);
+  if (store.pixabayMedia === "video") {
+    if (store.pixabayVideoType !== "all") {
+      const t = PIXABAY_VIDEO_TYPES.find((x) => x.value === store.pixabayVideoType);
+      if (t) parts.push(t.label);
+    }
+    if (store.pixabayVideoOrientation !== "horizontal") {
+      const o = PIXABAY_ORIENTATIONS.find((x) => x.value === store.pixabayVideoOrientation);
+      if (o) parts.push(o.label);
+    }
+  } else {
+    // 内容类型只有偏离默认（照片）时才提，否则每行都挂个"照片"是噪音
+    if (store.pixabayImageType !== "photo") {
+      const t = PIXABAY_IMAGE_TYPES.find((x) => x.value === store.pixabayImageType);
+      if (t) parts.push(t.label);
+    }
+    if (store.pixabayOrientation !== "horizontal") {
+      const o = PIXABAY_ORIENTATIONS.find((x) => x.value === store.pixabayOrientation);
+      if (o) parts.push(o.label);
+    }
+    if (store.pixabayColors.length) {
+      const names = store.pixabayColors
+        .map((v) => PIXABAY_COLORS.find((c) => c.value === v)?.label ?? "")
+        .filter(Boolean);
+      if (names.length) parts.push(names.join("/"));
+    }
+  }
+  if (store.pixabaySize !== "1920") {
+    const s = PIXABAY_SIZES.find((x) => x.value === store.pixabaySize);
+    if (s) parts.push(s.label);
+  }
+  return parts.join(" · ");
+});
+
 const dirHint = computed(() => {
   if (store.source === "system") {
     return "系统壁纸：C:\\Windows\\Web\\Wallpaper（只读）";
@@ -79,6 +266,20 @@ const dirHint = computed(() => {
   }
   if (store.source === "bing") {
     return "必应每日壁纸：在线图源，设为桌面时自动下载到本地";
+  }
+  if (store.source === "pixabay") {
+    // 筛选摘要优先展示 —— 它回答的是"为什么结果是这样的"
+    if (pixabayFilterSummary.value) {
+      return `Pixabay 筛选：${pixabayFilterSummary.value}`;
+    }
+    if (store.pixabayMedia === "video") {
+      // 视频没有"免费 key 只有 1280"的问题，改为说明清晰度偏好与下载时机
+      const q = store.pixabayVideoQuality === "large" ? "4K 优先" : "1080p";
+      return `Pixabay 视频：先预览，设为动态壁纸时下载到本地（${q}）`;
+    }
+    return store.pixabayDegraded
+      ? "Pixabay：免费 key 仅 1280px，申请 full access 后自动升级为原图"
+      : "Pixabay 在线图库：设为桌面时自动下载到本地";
   }
   return store.currentDir ? "壁纸目录：" + store.currentDir : "壁纸目录：默认（图片）";
 });
@@ -119,6 +320,161 @@ function syncThumb() {
 // 切换类型筛选
 function onFilterChange(key: LocalFilter) {
   void store.setLocalFilter(key);
+}
+
+// ---- 图片 / 视频 分段控件（Pixabay 工具条内）----
+//
+// 与上面本地那条是**两个独立控件**，各有各的滑块几何：
+// 两段宽度虽然现在相等，但以后改文案（"图片"/"视频 4K"）就会不等，
+// 写死 50% 会立刻错位 —— 沿用"实测宽度"这套做法最省心。
+const mediaSegEls = ref<(HTMLElement | null)[]>([]);
+const mediaThumbGeo = ref({ offset: 0, width: 0 });
+/// 当前选中项在分段里的下标。
+/// **按 value 查，不写死 `=== "video" ? 1 : 0`** —— 段数已经从 2 变 3，
+/// 写死索引的话再加一段就得再改一次，且改漏了滑块会停在错的段上（不报错）。
+const mediaActiveIndex = computed(() => {
+  const i = PIXABAY_MEDIA_OPTIONS.findIndex((m) => m.value === store.pixabayMedia);
+  return i < 0 ? 0 : i;
+});
+
+function setMediaSegRef(el: HTMLElement | null, i: number) {
+  mediaSegEls.value[i] = el;
+}
+
+function syncMediaThumb() {
+  const el = mediaSegEls.value[mediaActiveIndex.value];
+  if (!el) {
+    mediaThumbGeo.value = { offset: 0, width: 0 };
+    return;
+  }
+  mediaThumbGeo.value = { offset: el.offsetLeft, width: el.offsetWidth };
+}
+
+// ---- Pixabay 筛选浮层 ----
+//
+// 为什么是浮层、而不是像网页那样横排 6 个下拉：
+// 左栏在最小窗口（800px）下工具条只有约 394px，6 个下拉 + 排序排不开
+// —— 实测三段分段时就已把搜索框压到内部 49px（约 3.5 个汉字），再加必然崩。
+// 浮层里竖排，每个控件都有 ~180px，标签不会被 NSelect 静默裁掉。
+//
+// 面板本身用 `Teleport to="body"` + `fixed` 定位，与项目里 ContextMenu 同一套做法：
+// 放在 aside 内部会被 `.app-shell` 的 overflow-hidden 裁掉。
+const filterOpen = ref(false);
+const filterBtn = ref<HTMLElement | null>(null);
+const filterPanelEl = ref<HTMLElement | null>(null);
+/// 打开时按按钮位置实测出来的定位与最大高度
+const filterPanelStyle = ref<Record<string, string>>({ left: "0px", top: "0px" });
+
+/// 面板宽度。**改这里必须同步 `.filter-panel` 的 width**。
+const PANEL_WIDTH = 268;
+const PANEL_GAP = 6;
+const VIEWPORT_PAD = 8;
+
+/// 面板内所有 NSelect 的菜单标记类。
+///
+/// 菜单被 Naive UI Teleport 到 body，不在 `.filter-panel` 内 ⇒ 必须靠这个类
+/// 让"点外面收起"的逻辑放行选项。**面板里每加一个下拉都要挂上 `FILTER_MENU_PROPS`**，
+/// 漏挂的表现是"这个下拉选了没反应"（面板先被关掉，click 落不到选项上）。
+const FILTER_MENU_CLASS = "filter-menu";
+const FILTER_MENU_PROPS = { class: FILTER_MENU_CLASS };
+
+function toggleFilterPanel() {
+  if (filterOpen.value) {
+    filterOpen.value = false;
+    return;
+  }
+  const btn = filterBtn.value;
+  if (!btn) return;
+  const r = btn.getBoundingClientRect();
+  // 按钮在工具条最右侧 ⇒ 面板右对齐按钮，再往左收，避免超出窗口右边
+  let left = r.right - PANEL_WIDTH;
+  if (left < VIEWPORT_PAD) left = VIEWPORT_PAD;
+  const maxLeft = window.innerWidth - VIEWPORT_PAD - PANEL_WIDTH;
+  if (left > maxLeft) left = Math.max(VIEWPORT_PAD, maxLeft);
+  const below = window.innerHeight - r.bottom - PANEL_GAP - VIEWPORT_PAD;
+  filterPanelStyle.value = {
+    left: `${Math.round(left)}px`,
+    top: `${Math.round(r.bottom + PANEL_GAP)}px`,
+    // 最小窗口 800×480 时下方只剩约 370px，面板本身约 300px，够用；
+    // 兜底给个 max-height + 内部滚动，窗口再矮也不会顶出屏幕。
+    maxHeight: `${Math.max(200, Math.round(below))}px`,
+  };
+  filterOpen.value = true;
+}
+
+/// 点面板与按钮以外的地方收起。
+///
+/// 用 `pointerdown` 的**捕获阶段**：比 `click` 早一帧，避免"点卡片时面板先关、
+/// 卡片自己的 click 又被吃掉"的错位。面板与按钮自身的点击都要放行。
+///
+/// ⚠️ **【坑】NSelect 的下拉菜单不在面板 DOM 里。**
+/// Naive UI 把菜单 Teleport 到 `body > .v-binder-follower-container > ...`，
+/// 所以 `filterPanelEl.contains(target)` 对菜单里的选项**恒为 false**。
+/// 真实鼠标点选项时：pointerdown 先到 document 捕获阶段 ⇒ 判定"点在外面"
+/// ⇒ 面板被 `v-if` 卸掉 ⇒ 选项连 click 都收不到 ⇒ **选了没反应**。
+/// 程序化 `el.click()` 不产生 pointerdown，所以这个 bug 用 `el.click()` 测不出来
+/// （`cdp-filter-click.mjs` 用真实鼠标事件才复现）。
+/// 修法：给面板内所有 NSelect 的菜单打上 `filter-menu` 标记，一并放行。
+/// **新增面板内的下拉必须带 `:menu-props="FILTER_MENU_PROPS"`，否则选项点不动。**
+function onFilterOutside(e: PointerEvent) {
+  const t = e.target as Node | null;
+  if (!t) return;
+  if (filterPanelEl.value?.contains(t)) return;
+  if (filterBtn.value?.contains(t)) return;
+  if (t instanceof Element && t.closest(`.${FILTER_MENU_CLASS}`)) return;
+  filterOpen.value = false;
+}
+
+function onFilterEsc(e: KeyboardEvent) {
+  if (e.key === "Escape") filterOpen.value = false;
+}
+
+/// 窗口尺寸一变就收起：面板的 left/top 是**打开那一刻**按按钮位置算出来的，
+/// 窗口缩放后按钮会移动，面板却还停在原地 —— 看着像"飘在错的地方"。
+/// 收起比重新定位简单，也不会出现定位抖动的中间帧。
+function onFilterResize() {
+  filterOpen.value = false;
+}
+
+watch(filterOpen, (open) => {
+  if (open) {
+    document.addEventListener("pointerdown", onFilterOutside, true);
+    document.addEventListener("keydown", onFilterEsc);
+    window.addEventListener("resize", onFilterResize);
+  } else {
+    document.removeEventListener("pointerdown", onFilterOutside, true);
+    document.removeEventListener("keydown", onFilterEsc);
+    window.removeEventListener("resize", onFilterResize);
+  }
+});
+
+// 切来源时收起：面板里全是 Pixabay 的筛选，切到别处还浮着很怪
+watch(
+  () => store.source,
+  () => {
+    filterOpen.value = false;
+  }
+);
+
+onUnmounted(() => {
+  document.removeEventListener("pointerdown", onFilterOutside, true);
+  document.removeEventListener("keydown", onFilterEsc);
+  window.removeEventListener("resize", onFilterResize);
+});
+
+/// 颜色色块多选切换（接口的 `colors` 是 OR 语义，多值用逗号分隔）
+function toggleColor(value: string) {
+  const cur = store.pixabayColors;
+  const next = cur.includes(value) ? cur.filter((v) => v !== value) : [...cur, value];
+  void store.setPixabayColors(next);
+}
+
+/// 色块背景。`transparent` 必须用棋盘格 —— 直接给 transparent 会看不见这个色块，
+/// 用户只会以为"这里少了一个按钮"。
+function colorBg(value: string, hex: string): string {
+  return value === "transparent"
+    ? "repeating-conic-gradient(#8b95a5 0% 25%, #2b3240 0% 50%) 50% / 8px 8px"
+    : hex;
 }
 
 // 切换排序方式。
@@ -203,8 +559,10 @@ function onItemClick(item: WallpaperItem) {
 // 双击视频卡片：直接设为动态壁纸（对标图片卡片"点击预览 → 右侧设为壁纸"，
 // 视频多给一条直达路径，避免每次都要移动到右侧按钮）。
 // 多显示器下"播在哪几台"由右侧显示器选择决定（空选 = 全部），此处只负责触发。
+//
+// Pixabay 在线视频同样支持双击：会先下载到本地再设（见 store.setItemAsDesktop）。
 function onItemDblClick(item: WallpaperItem) {
-  if (item.kind !== "video") return;
+  if (item.kind !== "video" && item.kind !== "pixabay-video") return;
   void store.setItemAsDesktop(item);
 }
 
@@ -217,6 +575,15 @@ function onItemDblClick(item: WallpaperItem) {
 //（曾把 `:alt` 留在旧写法上，结果 alt 与可见文字不一致）。
 function itemLabel(item: WallpaperItem): string {
   return item.title || baseName(item.path || "") || "壁纸";
+}
+
+/// 视频时长角标：`12` → `0:12`，`95` → `1:35`。
+/// 超过一小时的素材在这个场景基本不存在，所以不做 `h:mm:ss` 分支 ——
+/// 真出现也只是显示成 `75:30`，仍然可读。
+function formatDuration(sec: number | undefined): string {
+  const s = Math.max(0, Math.round(sec || 0));
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, "0")}`;
 }
 
 // 收藏星标状态
@@ -236,15 +603,79 @@ function onItemContext(e: MouseEvent, item: WallpaperItem) {
   store.openContextMenu(item, e.clientX, e.clientY);
 }
 
-// 必应卡片：只下载到本地壁纸目录，不改桌面。
-// `bingDownloadingDate` 是 store 级的（同一时刻只允许一个下载在跑），
-// 故按钮文案/禁用态都按它判断，而不是每张卡片各存一份状态。
-function isBingDownloading(item: WallpaperItem) {
+// 必应 / Pixabay 的下载按钮逻辑已并入下方的 `isOnlineDownloading` / `onDownloadOnline`
+// —— 两者交互完全一致（只下载、不改桌面），只是落点不同，没必要各写一套。
+
+// ---- Pixabay ----
+
+// 搜索防抖：Pixabay 限流 100 次/60 秒，逐字发请求几秒就能打满。
+// 400ms 是"打字停顿"的经验值，短于它会在输入中途反复触发。
+let pixabayQueryTimer: number | null = null;
+function onPixabayQueryInput(v: string) {
+  const next = v ?? "";
+  if (pixabayQueryTimer !== null) window.clearTimeout(pixabayQueryTimer);
+  pixabayQueryTimer = window.setTimeout(() => {
+    pixabayQueryTimer = null;
+    void store.setPixabayQuery(next);
+  }, 400);
+}
+
+// 在线源（必应 / Pixabay）的下载按钮与「已下载」徽标结构相同、只有落点不同，
+// 故模板共用一套，由这里按 kind 分派 —— 避免在模板里堆三元表达式。
+/// 在线卡片是否正在下载。图片与视频共用 `pixabayDownloadingId` 这一个槽位
+/// （同一时刻只可能有一个下载在跑，两个槽位反而会出现"两个卡片同时转"）。
+function isOnlineDownloading(item: WallpaperItem): boolean {
+  if (item.kind === "pixabay" || item.kind === "pixabay-video") {
+    return !!item.onlineId && store.pixabayDownloadingId === item.onlineId;
+  }
   return !!item.date && store.bingDownloadingDate === item.date;
 }
 
-function onDownloadBing(item: WallpaperItem) {
-  void store.downloadBingWallpaper(item);
+function isOnlineDownloaded(item: WallpaperItem): boolean {
+  if (item.kind === "pixabay" || item.kind === "pixabay-video") {
+    return store.isPixabayDownloaded(item);
+  }
+  return store.isBingDownloaded(item);
+}
+
+function onDownloadOnline(item: WallpaperItem) {
+  if (item.kind === "pixabay" || item.kind === "pixabay-video") {
+    void store.downloadPixabayWallpaper(item);
+  } else {
+    void store.downloadBingWallpaper(item);
+  }
+}
+
+function onOpenDownloaded(item: WallpaperItem) {
+  if (item.kind === "pixabay" || item.kind === "pixabay-video") {
+    void store.openInLocalPixabay(item);
+  } else {
+    void store.openInLocal(item);
+  }
+}
+
+/// 打开作者主页（Pixabay API 条款要求署名可点回）。
+/// 走系统默认浏览器而不是 WebView 内跳转 —— 内跳会把整个应用界面替换掉且回不来。
+async function onOpenAuthor(item: WallpaperItem) {
+  if (!item.authorUrl) return;
+  try {
+    await openUrl(item.authorUrl);
+  } catch (err: unknown) {
+    toast("打开作者主页失败：" + ((err as Error)?.message || String(err)), "error");
+  }
+}
+
+// 未配置 key 时，空态里给一个就地填写入口（比"去设置里翻"少两步）
+const pixabayKeyInput = ref("");function savePixabayKey() {
+  const v = pixabayKeyInput.value.trim();
+  if (!v) {
+    toast("请先粘贴 API key", "warning");
+    return;
+  }
+  store.setPixabayKey(v);
+  pixabayKeyInput.value = "";
+  void store.reloadPixabay();
+  toast("已保存，正在加载…", "success");
 }
 
 // 滚动接近底部时触发加载更多
@@ -307,6 +738,7 @@ let filterRo: ResizeObserver | null = null;
 function syncFilterBarHeight() {
   filterBarHeight.value = filterBar.value?.offsetHeight ?? 0;
   syncThumb(); // 筛选栏尺寸变化时滑块可能也要重算
+  syncMediaThumb(); // 图片/视频那条同理
 }
 
 onMounted(() => {
@@ -320,7 +752,10 @@ onMounted(() => {
     // 首帧滑块初测：setSegRef 在渲染阶段才填充 segEls，
     // 而 watch(activeFilterIndex) 只在"变化"时触发 —— 初始选中态不会触发它，
     // 所以这里必须补一次，否则滑块初始宽度为 0（看不见）。
-    requestAnimationFrame(() => syncThumb());
+    requestAnimationFrame(() => {
+      syncThumb();
+      syncMediaThumb();
+    });
   });
   // 挂载时补一次初查：若首屏数据在 observer 生效前已 append（length 不再变化），
   // 且内容不满一屏，此时只能靠这里触发补页，否则将永远无滚动条、无法加载后续
@@ -359,6 +794,22 @@ watch(
     requestAnimationFrame(() => syncThumb());
   }
 );
+
+// Pixabay 工具条显隐：图片/视频分段只在它里面，出现时必须补测一次，
+// 否则滑块停在 {offset:0,width:0}（看不见）
+watch(
+  () => store.showPixabayTools,
+  async () => {
+    await nextTick();
+    requestAnimationFrame(() => syncMediaThumb());
+  }
+);
+
+// 图片 ⇄ 视频：滑块平移。等 DOM 更新后再测（切换会连带重载列表）
+watch(mediaActiveIndex, async () => {
+  await nextTick();
+  requestAnimationFrame(() => requestAnimationFrame(() => syncMediaThumb()));
+});
 
 // 选中项变化 → 滑块平移。等 DOM 更新后再测，确保 ref 已指向新渲染的分段。
 // 双 rAF 的必要性：切换筛选会触发列表重载，布局可能在同一帧内变动，
@@ -405,11 +856,27 @@ function onThumbLoad(e: Event) {
   <aside class="sidebar flex min-w-0 flex-[1.15] flex-col">
     <!-- 顶部：源标签 + 操作 -->
     <div class="sidebar-top mb-2.5 flex items-center justify-between gap-2">
-      <div class="source-tabs flex items-center gap-2">
+      <!-- 选项卡条。**每个 tab 都必须 shrink-0 + whitespace-nowrap**：
+           不加的话空间一紧，flex 会去压缩 tab 内部，文字被挤成竖排（"本/地"两行），
+           且不报错 —— 这是 5 个来源全开 + 最小窗口 800px 时真实踩到的坑。
+
+           **实测宽度**（headless Chrome 800×480、12px 字、Windows 默认字体）：
+             本地/收藏/系统/必应 = 56 each → 224
+             Pixabay            = 74
+             4 个 gap-1.5(6px)  = 24   ⇒ 标签条合计 322
+             右侧计数 "12/12"    = 24.5
+             两处 flex gap-2     = 16
+             合计 ≈ 363 / 容器 396px，余量 33px。
+           ⚠️ 再加第 6 个来源（≈+62）就会溢出 —— 溢出时标签条会顶出去、计数被挤掉，
+           不会报错。真加之前先重新量。
+           末尾那个「＋ 添加来源」约 21px + gap 6 = 27px，正好卡在 33px 余量内；
+           **而且它只在还有来源被隐藏时渲染**，5 个全开时它自己消失 ——
+           所以这个入口不会把标签条顶破。 -->
+      <div class="source-tabs flex min-w-0 items-center gap-1.5">
         <button
           v-for="tab in visibleSourceTabs"
           :key="tab.key"
-          class="tab-btn flex cursor-pointer items-center gap-1 rounded-md px-3 py-1 text-[12px] font-medium transition-colors"
+          class="tab-btn flex shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap rounded-md px-2 py-1 text-[12px] font-medium transition-colors"
           :class="
             store.source === tab.key
               ? 'bg-accent-soft text-accent'
@@ -420,11 +887,54 @@ function onThumbLoad(e: Event) {
           <NIcon :component="tab.icon" :size="12" />
           {{ tab.label }}
         </button>
+        <!-- 「添加来源」入口：**只在还有隐藏来源时渲染**。
+             全开时它自己消失，所以不占那 33px 的余量（见上方宽度预算）。
+             低调处理：无文字、无边框，只有 hover 才提亮，不抢页签的视觉权重。 -->
+        <button
+          v-if="hiddenSources.length"
+          ref="srcMenuBtn"
+          class="src-add flex shrink-0 cursor-pointer items-center justify-center rounded-md p-1 transition-colors"
+          :class="srcMenuOpen ? 'bg-accent-soft text-accent' : 'text-faint hover:bg-white/5 hover:text-tx'"
+          :title="`添加壁纸来源（还有 ${hiddenSources.length} 个未显示）`"
+          @click="toggleSrcMenu"
+        >
+          <NIcon :component="Plus" :size="13" />
+        </button>
       </div>
-      <span v-if="store.allCount > 0" class="tab-count text-[11px] text-dim">
+      <span
+        v-if="store.allCount > 0"
+        class="tab-count shrink-0 whitespace-nowrap text-[11px] text-dim"
+      >
           {{ store.gridItems.length }}/{{ store.allCount }}
         </span>
     </div>
+
+    <!-- 「添加来源」浮层。与筛选浮层同一套做法（Teleport 到 body + fixed + 实测定位）：
+         放在 aside 里会被 `.app-shell` 的 overflow-hidden 裁掉。 -->
+    <Teleport to="body">
+      <Transition name="filter-pop">
+        <div
+          v-if="srcMenuOpen && hiddenSources.length"
+          ref="srcMenuEl"
+          class="src-menu app-no-drag fixed z-[88] rounded-xl border border-line-2 bg-[rgba(24,31,45,0.97)] p-1.5 shadow-[0_14px_36px_rgba(0,0,0,0.45)] backdrop-blur-xl"
+          :style="srcMenuStyle"
+          @mousedown.stop
+        >
+          <div class="px-1.5 pb-1 pt-0.5 text-[10.5px] text-faint">添加来源</div>
+          <button
+            v-for="s in hiddenSources"
+            :key="s.key"
+            class="src-menu-row flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-white/5"
+            :title="`开启后在左侧页签条显示${s.label}`"
+            @click="enableSource(s.key)"
+          >
+            <NIcon :component="s.icon" :size="13" class="shrink-0 text-dim" />
+            <span class="flex-1 text-[12px] text-tx">{{ s.label }}</span>
+            <span class="shrink-0 text-[10.5px] text-accent">开启</span>
+          </button>
+        </div>
+      </Transition>
+    </Teleport>
 
     <!-- 网格容器：与右栏预览容器（CurrentPanel.vue 的 preview-container）
          保持**完全一致**的面板样式（rounded-xl + border-line + bg-panel/55）。
@@ -493,12 +1003,84 @@ function onThumbLoad(e: Event) {
         </div>
       </div>
 
+      <!-- Pixabay 工具条：搜索框 + 媒体类型 + 分类。与本地那条互斥显示
+           （v-else-if 必须紧邻 v-if，中间不能插别的元素）。
+           宽度预算（最小窗口 800px，左栏可用 ≈394px）：
+           搜索框 flex-1 + 分段 130px（三段×42 + 4 padding）+ 分类 88px + gap 4×2。
+           三段比原来的两段多占 42px，是从 `.segmented-item` 的 padding 和
+           分类下拉的定宽里各挤出来的 —— 改这里任何一项都要重新量一次。 -->
+      <div
+        v-else-if="store.showPixabayTools"
+        ref="filterBar"
+        class="filter-bar flex flex-none items-center gap-1 px-3 py-2"
+      >
+        <NInput
+          :value="store.pixabayQuery"
+          size="small"
+          class="search-input"
+          placeholder="搜索…"
+          clearable
+          @update:value="onPixabayQueryInput"
+        >
+          <template #prefix>
+            <NIcon :component="Search" :size="13" />
+          </template>
+        </NInput>
+        <!-- 图片 / 视频：Pixabay 一个来源里的两种媒体，共用搜索词、分类与排序。
+             与本地那条类型筛选同一套视觉（复用 .segmented 三个类），
+             但滑块几何是各自独立的（mediaThumbGeo）—— 两段宽度将来可能不等。 -->
+        <div class="segmented relative flex shrink-0 items-center">
+          <span
+            class="segmented-thumb absolute top-0 bottom-0"
+            :style="{
+              width: mediaThumbGeo.width + 'px',
+              transform: `translateX(${mediaThumbGeo.offset}px)`,
+            }"
+          ></span>
+          <button
+            v-for="(m, i) in PIXABAY_MEDIA_OPTIONS"
+            :key="m.value"
+            :ref="(el) => setMediaSegRef(el as HTMLElement | null, i)"
+            class="segmented-item relative z-[1] cursor-pointer text-[12px] transition-colors"
+            :class="store.pixabayMedia === m.value ? 'text-tx' : 'text-dim hover:text-tx'"
+            :title="m.title"
+            @click="store.setPixabayMedia(m.value)"
+          >
+            {{ m.label }}
+          </button>
+        </div>
+        <!-- 筛选按钮：把网页那排下拉收进一个浮层。
+             宽度预算（最小窗口 800px，工具条 ≈394px，内边距 32px ⇒ 362px）：
+             分段 88（两段×42 + 4）+ 按钮 54 + gap 4×2 = 150
+             ⇒ 搜索框 flex-1 拿到约 209px（内部 ≈150px，够打 10 个汉字）。
+             原来"照片/插画/视频"三段时搜索框只剩 144px，现在两段反而更宽。
+             角标只统计**偏离默认值**的筛选，否则一进来就显示 3，等于谎报。 -->
+        <button
+          ref="filterBtn"
+          class="filter-btn flex shrink-0 cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-[12px] transition-colors"
+          :class="
+            filterOpen || store.pixabayFilterCount
+              ? 'bg-accent-soft text-accent'
+              : 'text-dim hover:text-tx'
+          "
+          :title="store.pixabayFilterCount ? `已启用 ${store.pixabayFilterCount} 项筛选` : '筛选条件'"
+          @click="toggleFilterPanel"
+        >
+          <NIcon :component="SlidersHorizontal" :size="13" />
+          筛选
+          <span
+            v-if="store.pixabayFilterCount"
+            class="filter-badge flex items-center justify-center rounded-full"
+          >{{ store.pixabayFilterCount }}</span>
+        </button>
+      </div>
+
       <!-- 首次加载 loading 层：allCount 已拉取但 gridItems 尚未渲染时展示。
            覆盖范围排除上方本地工具条（工具条是常驻控件，加载中也应保持可用）：
            用 flex 兄弟关系而非硬编码 top 值，工具条高度变化时无需同步修改 -->
       <div
         class="loading-overlay absolute inset-x-0 bottom-0 z-20 flex flex-col items-center justify-center"
-        :style="{ top: store.showLocalTools ? filterBarHeight + 'px' : '0px' }"
+        :style="{ top: store.showLocalTools || store.showPixabayTools ? filterBarHeight + 'px' : '0px' }"
         :class="store.allCount > 0 && !store.gridItems.length && !store.loadingMore ? 'opacity-100' : 'opacity-0 invisible transition-opacity duration-200'"
       >
         <div class="relative h-14 w-14">
@@ -581,10 +1163,10 @@ function onThumbLoad(e: Event) {
                    点击跳「本地」选项卡并按其日期过滤定位 —— 在线列表只有最近 16 天，
                    超出窗口的老壁纸只能去本地找。 -->
               <button
-                v-if="store.isBingDownloaded(item)"
+                v-if="isOnlineDownloaded(item)"
                 class="downloaded-badge absolute left-1.5 top-1.5 z-[6] flex cursor-pointer items-center gap-1 rounded-md border border-white/10 bg-black/55 px-1.5 py-[2px] backdrop-blur-[2px] transition-colors duration-200 hover:border-white/25 hover:bg-black/70"
                 title="已下载到本地 · 点击在「本地」选项卡中查看"
-                @click.stop="store.openInLocal(item)"
+                @click.stop="onOpenDownloaded(item)"
               >
                 <NIcon :component="Check" :size="10" class="text-ok" />
                 <span class="text-[9.5px] leading-none text-white/85">已下载</span>
@@ -597,27 +1179,85 @@ function onThumbLoad(e: Event) {
                    的时刻，不该让按钮还藏着。
                    已下载时这个槽位让给左上角的「已下载」徽标，两者互斥不重叠。 -->
               <button
-                v-if="item.kind === 'bing' && !store.isBingDownloaded(item)"
-                class="bing-dl absolute right-1.5 top-1.5 z-[6] flex cursor-pointer items-center gap-1 rounded-md border border-white/10 bg-black/45 px-1.5 py-[2px] opacity-0 backdrop-blur-[2px] transition-opacity duration-200 group-hover:opacity-100 hover:border-white/25 hover:bg-black/65"
-                :style="isBingDownloading(item) || isSelected(item) ? { opacity: 1 } : undefined"
-                :disabled="!!store.bingDownloadingDate"
+                v-if="(item.kind === 'bing' || item.kind === 'pixabay') && !isOnlineDownloaded(item)"
+                class="online-dl absolute right-1.5 top-1.5 z-[6] flex cursor-pointer items-center gap-1 rounded-md border border-white/10 bg-black/45 px-1.5 py-[2px] opacity-0 backdrop-blur-[2px] transition-opacity duration-200 group-hover:opacity-100 hover:border-white/25 hover:bg-black/65"
+                :style="isOnlineDownloading(item) || isSelected(item) ? { opacity: 1 } : undefined"
+                :disabled="!!store.bingDownloadingDate || !!store.pixabayDownloadingId"
                 :title="'下载到本地壁纸目录（不会改变桌面）'"
-                @click.stop="onDownloadBing(item)"
+                @click.stop="onDownloadOnline(item)"
               >
                 <NIcon
                   :component="Download"
                   :size="10"
-                  :class="isBingDownloading(item) ? 'text-accent' : 'text-white/75'"
+                  :class="isOnlineDownloading(item) ? 'text-accent' : 'text-white/75'"
                 />
                 <span class="text-[9.5px] leading-none text-white/85">
-                  {{ isBingDownloading(item) ? "下载中" : "下载" }}
+                  {{ isOnlineDownloading(item) ? "下载中" : "下载" }}
+                </span>
+              </button>
+              <!-- 视频时长角标：**常显**（本地视频与 Pixabay 在线视频共用）。
+                   它和署名不一样 —— 署名是归属信息（hover 才出即可），
+                   时长是"这条内容是什么"的实质信息，必须一眼看得到，
+                   否则用户点开才发现是段 3 秒的短片，白等一次预览。
+                   放左下角：右下角留给署名，右上角是下载按钮，左上角是「已下载」。
+                   本地视频的时长由后端探测（Media Foundation 元数据，不解码）
+                   落 `.dur` 边车文件，再经 `thumbnail-updated` 事件补进来；
+                   探测完成前 `duration` 是 undefined ⇒ **不渲染**，
+                   而不是显示 `0:00`（假数据比没有更糟）。 -->
+              <span
+                v-if="
+                  (item.kind === 'video' || item.kind === 'pixabay-video') &&
+                  item.duration
+                "
+                class="video-dur absolute bottom-2 left-2 z-[5] flex items-center gap-1 rounded bg-black/60 px-1.5 py-1 backdrop-blur-[2px]"
+                :title="`视频时长 ${formatDuration(item.duration)}`"
+              >
+                <NIcon :component="Play" :size="9" class="shrink-0 text-white/85" />
+                <span class="font-mono text-[9.5px] leading-none text-white/85">
+                  {{ formatDuration(item.duration) }}
+                </span>
+              </span>
+              <!-- Pixabay 署名：**hover 才出现，不常显**，位置在**缩略图右下角**。
+                   依据（已核对官方原文）：Content License 明确写着 "Use Content without
+                   having to attribute the author"，所以署名**不是合规项**；API Terms 要求的
+                   只是"标明图片来自哪里"，那由页脚常显的「Pixabay：…」和选项卡名承担。
+                   留它纯粹是体验：看到喜欢的图能点回作者主页找更多。
+                   ① 放缩略图上而不是标题行 —— 标题行是所有来源共用的，为它留位置会把
+                      本地/必应的长文件名一起截短（踩过）。
+                   ② 做成右下角小角标，而不是底部通栏渐变 —— 通栏会压住缩略图下缘，
+                      紧挨着下面的标题，视觉上像"两行标题"（用户否过）。
+                   ③ ⚠️ **必须留在这个 `.thumb-holder` 里面**。绝对定位的基准是最近的
+                      定位祖先：放在卡片里就是整张卡片（182px，含 150px 图 + 32px 标题行），
+                      `bottom-2` 会直接落到标题上（踩过，实测压住标题 22px）。
+                      放在 `.thumb-holder`（150px、`relative` + `overflow-hidden`）里，
+                      才是"图片右下角"，且超出部分自动裁掉。 -->
+              <button
+                v-if="
+                  (item.kind === 'pixabay' || item.kind === 'pixabay-video') &&
+                  item.author
+                "
+                class="pixabay-credit absolute bottom-2 right-2 z-[5] flex max-w-[calc(100%_-_16px)] items-center rounded bg-black/60 px-1.5 py-1 text-left opacity-0 backdrop-blur-[2px] transition-opacity duration-200 group-hover:opacity-100"
+                :class="item.authorUrl ? 'cursor-pointer' : 'cursor-default'"
+                :title="
+                  item.authorUrl
+                    ? `作者：${item.author} · 点击在浏览器中打开其 Pixabay 主页`
+                    : `作者：${item.author}`
+                "
+                @click.stop="onOpenAuthor(item)"
+              >
+                <span class="truncate text-[9.5px] leading-none text-white/85">
+                  {{ item.author }}
                 </span>
               </button>
             </div>
             <!-- 收藏星标：已收藏常显琥珀色，未收藏 hover 浮现；点击切换收藏
                 （必应在线壁纸为远程 URL，不参与收藏夹书签体系，不显示星标） -->
             <button
-              v-if="item.kind !== 'bing'"
+              v-if="
+                item.kind !== 'bing' &&
+                item.kind !== 'pixabay' &&
+                item.kind !== 'pixabay-video'
+              "
               class="fav-badge absolute right-1.5 top-1.5 z-[6] flex h-[22px] w-[22px] cursor-pointer items-center justify-center rounded-md border border-white/10 bg-black/45 opacity-0 backdrop-blur-[2px] transition-opacity duration-200 group-hover:opacity-100 hover:border-white/25 hover:bg-black/65"
               :style="isFav(item) ? { opacity: 1 } : undefined"
               :title="isFav(item) ? '取消收藏' : '收藏 (Ctrl+F)'"
@@ -632,11 +1272,18 @@ function onThumbLoad(e: Event) {
             </button>
             <div class="meta flex min-w-0 items-center gap-1.5 px-2 py-1.5">
               <!-- 卡片宽度自适应，标题长了会截断 —— 挂原生 title，鼠标悬停看全名。
-                   可见文字与 title 同源（itemLabel），不会出现"看到的和提示的不一样" -->
-              <span class="name truncate text-[11.5px] text-dim" :title="itemLabel(item)">
+                   可见文字与 title 同源（itemLabel），不会出现"看到的和提示的不一样"。
+                   ⚠️ 只加 `min-w-0`（修 flex item 默认 min-width:auto 导致长标题溢出容器
+                   而不是出省略号），**不要加任何 max-width** —— 这是所有来源共用的标题行，
+                   给 Pixabay 署名留位置而限制宽度，会连带把本地/必应的长文件名截短。 -->
+              <span
+                class="name min-w-0 truncate text-[11.5px] text-dim"
+                :title="itemLabel(item)"
+              >
                 {{ itemLabel(item) }}
               </span>
-              <!-- 状态点：绿=当前壁纸(已设置到桌面/正在播放)，蓝=正在预览(选中) -->
+              <!-- 状态点：绿=当前壁纸(已设置到桌面/正在播放)，蓝=正在预览(选中)。
+                   `ml-auto` 把它顶到最右，中间空余全归它。 -->
               <span
                 v-if="isCurrent(item) || isSelected(item)"
                 class="status-dot ml-auto h-1.5 w-1.5 shrink-0 rounded-full"
@@ -661,32 +1308,61 @@ function onThumbLoad(e: Event) {
 
         <!-- 空态 -->
         <div v-else class="empty col-span-full flex flex-col items-center justify-center py-16 text-center">
-          <p class="text-[13px] text-dim">
-            {{
-              store.source === "local" && store.localQuery.trim()
-                ? "没有匹配结果"
-                : "暂无壁纸"
-            }}
-          </p>
-          <p class="empty-sub mt-1 text-[11.5px] text-faint">
-            {{
-              // 搜索分支排最前：它是"为什么看不到东西"里最直接的原因
-              //（目录里确实有视频时筛选器不会停在"视频"，故不会互相遮蔽）
-              store.source === "local" && store.localQuery.trim()
-                ? `没有名称包含「${store.localQuery.trim()}」的壁纸，换个关键词或清空搜索框`
-                : store.source === "local" && store.localFilter === "video"
-                  ? "此目录下暂无视频，可切回「全部」或「图片」"
-                  : store.source === "local" && store.localFilter === "image"
-                    ? "此目录下暂无可用的静态图片，可切回「全部」或「视频」"
-                    : store.source === "favorites"
-                      ? "还没有收藏的壁纸：右键壁纸或点击卡片星标即可收藏"
-                      : store.source === "system"
-                        ? "系统壁纸目录中暂无可用图片"
-                        : store.source === "bing"
-                          ? "必应壁纸加载失败：请检查网络连接后重试"
-                          : "此目录下暂无图片或视频，可到设置中更换壁纸目录"
-            }}
-          </p>
+          <!-- Pixabay 还没配 key：就地给填写入口，不逼用户去设置里翻 -->
+          <template v-if="store.source === 'pixabay' && !store.pixabayKey">
+            <p class="text-[13px] text-dim">需要 Pixabay API key</p>
+            <p class="empty-sub mt-1 max-w-[300px] text-[11.5px] leading-relaxed text-faint">
+              在 pixabay.com 免费注册即可获取，key 只保存在本机，不会上传。
+            </p>
+            <div class="mt-3 flex w-full max-w-[260px] items-center gap-1.5 px-2">
+              <NInput
+                v-model:value="pixabayKeyInput"
+                size="small"
+                placeholder="粘贴 API key"
+                @keyup.enter="savePixabayKey"
+              />
+              <button
+                class="shrink-0 cursor-pointer rounded-md border border-accent/40 bg-accent-soft px-2.5 py-1 text-[11.5px] text-accent transition-colors hover:bg-accent/20"
+                @click="savePixabayKey"
+              >
+                保存
+              </button>
+            </div>
+          </template>
+          <template v-else>
+            <p class="text-[13px] text-dim">
+              {{
+                store.source === "local" && store.localQuery.trim()
+                  ? "没有匹配结果"
+                  : "暂无壁纸"
+              }}
+            </p>
+            <p class="empty-sub mt-1 text-[11.5px] text-faint">
+              {{
+                // 搜索分支排最前：它是"为什么看不到东西"里最直接的原因
+                //（目录里确实有视频时筛选器不会停在"视频"，故不会互相遮蔽）
+                store.source === "local" && store.localQuery.trim()
+                  ? `没有名称包含「${store.localQuery.trim()}」的壁纸，换个关键词或清空搜索框`
+                  : store.source === "local" && store.localFilter === "video"
+                    ? "此目录下暂无视频，可切回「全部」或「图片」"
+                    : store.source === "local" && store.localFilter === "image"
+                      ? "此目录下暂无可用的静态图片，可切回「全部」或「视频」"
+                      : store.source === "favorites"
+                        ? "还没有收藏的壁纸：右键壁纸或点击卡片星标即可收藏"
+                        : store.source === "system"
+                          ? "系统壁纸目录中暂无可用图片"
+                          : store.source === "bing"
+                            ? "必应壁纸加载失败：请检查网络连接后重试"
+                            : store.source === "pixabay"
+                              ? store.pixabayMedia === "video"
+                                ? "Pixabay 没有匹配的视频：换个关键词，或点「筛选」放宽条件"
+                                : store.pixabayFilterCount
+                                  ? "当前筛选条件下没有结果：点「筛选」把条件放宽，或直接重置"
+                                  : "Pixabay 没有匹配结果：换个关键词试试"
+                              : "此目录下暂无图片或视频，可到设置中更换壁纸目录"
+              }}
+            </p>
+          </template>
         </div>
 
         <!-- 底部加载状态 -->
@@ -723,8 +1399,144 @@ function onThumbLoad(e: Event) {
           :options="LOCAL_SORT_OPTIONS"
           @update:value="onSortChange"
         />
+        <!-- Pixabay 的排序挂在同一位置：页脚整行本来就空着，
+             而顶部那行要留给搜索框（分类已经占掉 104px） -->
+        <NSelect
+          v-else-if="store.showPixabayTools"
+          :value="store.pixabayOrder"
+          size="tiny"
+          class="sort-select"
+          :options="PIXABAY_ORDER_OPTIONS"
+          @update:value="(v: string) => store.setPixabayOrder(v)"
+        />
       </div>
     </div>
+
+    <!-- Pixabay 筛选浮层。
+         必须 Teleport 到 body —— 留在 aside 里会被 `.app-shell` 的
+         overflow-hidden 裁掉（与 ContextMenu 同一套做法、同一个理由）。
+         位置/最大高度在 `toggleFilterPanel()` 里按按钮实测，不写死。 -->
+    <Teleport to="body">
+      <Transition name="filter-pop">
+        <div
+          v-if="filterOpen && store.showPixabayTools"
+          ref="filterPanelEl"
+          class="filter-panel app-no-drag fixed z-[88] overflow-y-auto rounded-xl border border-line-2 bg-[rgba(24,31,45,0.97)] p-2.5 shadow-[0_14px_36px_rgba(0,0,0,0.45)] backdrop-blur-xl"
+          :style="filterPanelStyle"
+          @mousedown.stop
+        >
+          <!-- 分类：图片与视频共用 -->
+          <div class="fp-row">
+            <span class="fp-label">分类</span>
+            <NSelect
+              size="small"
+              class="fp-select"
+              :menu-props="FILTER_MENU_PROPS"
+              :value="store.pixabayCategory"
+              :options="PIXABAY_CATEGORY_OPTIONS"
+              @update:value="(v: string) => store.setPixabayCategory(v)"
+            />
+          </div>
+
+          <!-- 视频模式：视频类型 + 方向 + 尺寸。
+               内容类型 / 颜色这两项**视频接口根本不支持**（传了静默忽略），
+               所以不渲染 —— 摆出来一个改了没反应的控件比不摆更糟。
+               方向则是**后端按宽高本地筛**的（接口没有 orientation 参数），
+               所以它在这里是真的有用，只是生效路径与图片不同。 -->
+          <template v-if="store.pixabayMedia === 'video'">
+            <div class="fp-row">
+              <span class="fp-label">视频类型</span>
+              <NSelect
+                size="small"
+                class="fp-select"
+                :menu-props="FILTER_MENU_PROPS"
+                :value="store.pixabayVideoType"
+                :options="VIDEO_TYPE_OPTIONS"
+                @update:value="(v: PixabayVideoType) => store.setPixabayVideoType(v)"
+              />
+            </div>
+            <div class="fp-row">
+              <span class="fp-label">方向</span>
+              <NSelect
+                size="small"
+                class="fp-select"
+                :menu-props="FILTER_MENU_PROPS"
+                :value="store.pixabayVideoOrientation"
+                :options="ORIENTATION_OPTIONS"
+                @update:value="(v: PixabayOrientation) => store.setPixabayVideoOrientation(v)"
+              />
+            </div>
+          </template>
+
+          <!-- 图片模式：内容类型 / 方向 / 尺寸 / 颜色 -->
+          <template v-else>
+            <div class="fp-row">
+              <span class="fp-label">内容类型</span>
+              <NSelect
+                size="small"
+                class="fp-select"
+                :menu-props="FILTER_MENU_PROPS"
+                :value="store.pixabayImageType"
+                :options="IMAGE_TYPE_OPTIONS"
+                @update:value="(v: PixabayImageType) => store.setPixabayImageType(v)"
+              />
+            </div>
+            <div class="fp-row">
+              <span class="fp-label">方向</span>
+              <NSelect
+                size="small"
+                class="fp-select"
+                :menu-props="FILTER_MENU_PROPS"
+                :value="store.pixabayOrientation"
+                :options="ORIENTATION_OPTIONS"
+                @update:value="(v: PixabayOrientation) => store.setPixabayOrientation(v)"
+              />
+            </div>
+          </template>
+
+          <div class="fp-row">
+            <span class="fp-label">尺寸</span>
+            <NSelect
+              size="small"
+              class="fp-select"
+              :menu-props="FILTER_MENU_PROPS"
+              :value="store.pixabaySize"
+              :options="SIZE_OPTIONS"
+              @update:value="(v: PixabaySize) => store.setPixabaySize(v)"
+            />
+          </div>
+
+          <!-- 颜色：多选色块。14 个色块排 7×2，每格 20px + 6px gap = 176px，
+               正好塞进面板 268 - 20(内边距) - 52(标签) - 8(gap) = 188px。 -->
+          <div v-if="store.pixabayMedia !== 'video'" class="fp-col">
+            <span class="fp-label">颜色</span>
+            <div class="fp-swatches mt-1.5 grid grid-cols-7 gap-1.5">
+              <button
+                v-for="c in PIXABAY_COLORS"
+                :key="c.value"
+                class="color-dot cursor-pointer"
+                :class="{ 'is-on': store.pixabayColors.includes(c.value) }"
+                :style="{ background: colorBg(c.value, c.hex) }"
+                :title="c.label"
+                @click="toggleColor(c.value)"
+              />
+            </div>
+          </div>
+
+          <div class="fp-foot mt-2 flex items-center justify-between border-t border-line pt-2">
+            <span class="text-[10.5px] text-faint">
+              {{ store.pixabayFilterCount ? `已启用 ${store.pixabayFilterCount} 项` : "改动即时生效" }}
+            </span>
+            <button
+              class="fp-reset shrink-0 cursor-pointer rounded px-1.5 py-0.5 text-[11px] text-dim transition-colors hover:bg-white/10 hover:text-tx"
+              @click="store.resetPixabayFilters()"
+            >
+              重置
+            </button>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </aside>
 </template>
 
@@ -753,6 +1565,85 @@ function onThumbLoad(e: Event) {
 .search-input {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/* Pixabay 筛选按钮上的角标：只统计偏离默认值的筛选数。
+   宽度随位数自适应（min-width 兜住一位数），字号比正文更小 —— 它是个提示，
+   不是主信息，抢眼会盖过"筛选"二字。 */
+.filter-badge {
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1;
+  color: #0b1220;
+  background: var(--color-accent);
+}
+
+/* 筛选浮层。宽度**必须与 `PANEL_WIDTH` 常量一致**（定位靠它算左边界），
+   改一个不改另一个会让面板从右侧溢出屏幕。 */
+.filter-panel {
+  width: 268px;
+}
+
+/* 一行 = 左侧标签 + 右侧控件。
+   标签定宽 52px：最长是「内容类型」「视频类型」= 4 字 × 11px ≈ 44px，
+   留 8px 余量。控件 flex-1 拿到 268 - 20(面板内边距) - 52 - 8(gap) = 188px。 */
+.fp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.fp-label {
+  flex: 0 0 auto;
+  width: 52px;
+  font-size: 11px;
+  color: var(--color-dim);
+}
+
+/* NSelect 内部输入框有基础宽度、不跟随外层收缩，必须显式撑满 */
+.fp-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.fp-select :deep(.n-base-selection) {
+  width: 100%;
+}
+
+/* 颜色色块：20px 圆点。选中用 2px 主色描边 + 留白，
+   不改变尺寸（否则选中瞬间会顶动周围色块）。 */
+.color-dot {
+  width: 20px;
+  height: 20px;
+  border: 1px solid rgb(255 255 255 / 0.16);
+  border-radius: 9999px;
+  transition:
+    box-shadow 0.15s ease,
+    transform 0.15s ease;
+}
+.color-dot:hover {
+  transform: scale(1.1);
+}
+.color-dot.is-on {
+  box-shadow:
+    0 0 0 2px rgba(24, 31, 45, 1),
+    0 0 0 4px var(--color-accent);
+}
+
+.filter-pop-enter-active,
+.filter-pop-leave-active {
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+  transform-origin: top right;
+}
+.filter-pop-enter-from,
+.filter-pop-leave-to {
+  opacity: 0;
+  transform: scale(0.97) translateY(-2px);
 }
 
 /* 排序下拉定宽（挂在底部页脚里）。定宽依据 —— 已按 Naive UI 源码实测：
@@ -812,11 +1703,12 @@ function onThumbLoad(e: Event) {
 }
 
 /* 分段按钮：左右内边距决定每段宽度（滑块宽度实测自它），
-   三段宽度由文字长度自然决定，不做等宽处理。
-   12px 是舒适值；排序下拉从这一行挪走后宽度已够（搜索框仍有约 217px），
-   不必再为省地方而收紧。 */
+   各段宽度由文字长度自然决定，不做等宽处理。
+   9px 而不是 12px：Pixabay 那条从两段变三段后，800px 窗口下搜索框内部
+   只剩 49px（约 3.5 个中文字），已经没法输入。收紧到 9px 后每段 42px、
+   三段共省 18px，搜索框回到约 87px。本地那条（全部/图片/视频）同时受益。 */
 .segmented-item {
-  padding: 4px 12px;
+  padding: 4px 9px;
   line-height: 1.2;
   white-space: nowrap;
   background: transparent;

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 关于 - 应用信息 + 检查更新（发现新版本后弹出通用 UpdateDialog）
 import { NButton, NIcon } from "naive-ui";
-import { Github, Info, RefreshCw, Rocket, ArrowRight } from "lucide-vue-next";
+import { Copyright, Github, Info, RefreshCw, Rocket, ArrowRight } from "lucide-vue-next";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import dotCode from "@/assets/dotCode.png";
 import { useUpdaterStore } from "@/stores/updater";
@@ -33,9 +33,28 @@ async function handleCheckUpdate() {
 }
 
 const GITHUB_URL = "https://github.com/wch2019/DotWallpaper";
+// 官方许可页（标题 "Content License - Pixabay"）。注意**不要**指向 /service/terms/：
+// 那是法律全文，用户看不懂；license-summary 才是给人读的摘要。
+const PIXABAY_LICENSE_URL = "https://pixabay.com/service/license-summary/";
+
+/// 完整条款说明 —— 卡片上放不下，挂到 `title` 里供需要的人悬停查看。
+/// 措辞按官方原文校准：Content License **不要求署名**（"Use Content without having to
+/// attribute the author"），可免费用 / 可改 / 无需署名，但不得以独立文件形式再分发。
+/// 真正要求"标明来源"的是 API Terms，不是许可本身 —— 别混着写。
+const LICENSE_FULL_TEXT =
+  "在线图片分别来自必应每日壁纸与 Pixabay。Pixabay 图片遵循 Content License：" +
+  "可免费使用与修改、无需署名，但不得以原图形式单独再分发。" +
+  "卡片上仍会显示作者，方便你回到原图页面；在线图片只在你设为桌面壁纸时下载到本地，不做永久外链。";
 
 function openGitHub() {
   openUrl(GITHUB_URL);
+}
+
+// 许可页 / 来源站都在系统浏览器里打开（WebView 内跳转会把整个界面替换掉且回不来）
+function openLicUrl(url: string) {
+  openUrl(url).catch((e: unknown) => {
+    toast(`打开链接失败：${errText(e)}`, "error");
+  });
 }
 </script>
 
@@ -72,6 +91,32 @@ function openGitHub() {
         <div class="min-w-0 flex-1">
           <div class="text-[12px] font-medium text-tx">项目主页</div>
           <p class="mt-0.5 text-[11px] text-faint">在 GitHub 查看源码、提交反馈，获取最新动态。</p>
+        </div>
+        <ArrowRight :size="14" class="shrink-0 text-faint" />
+      </button>
+
+      <!-- 图片来源与许可：**合规要求，不是装饰**。
+           Pixabay 的 Content License 本身不要求署名，但 API Terms 明确要求
+           「展示搜索结果时必须让用户知道图片来自哪里」，商店审核也会看这一条。
+
+           形态与「项目主页」一致（图标 + 标题 + 副标题 + 箭头，整卡可点）：
+           许可全文本来就该在许可页看，应用内只需要"说清来源 + 给出处"。
+           之前写了两段完整条款，卡片高 125px，把「检查更新」挤到折叠线以下 ——
+           用户来「关于」是看版本和更新的，不是来读协议的。
+           完整说明挂 `title`，需要的人悬停能看到。 -->
+      <button
+        class="flex w-full cursor-pointer items-center gap-3 rounded-lg bg-panel-2 px-4 py-4 text-left transition-colors hover:opacity-85"
+        :title="LICENSE_FULL_TEXT"
+        @click="openLicUrl(PIXABAY_LICENSE_URL)"
+      >
+        <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+          <Copyright :size="20" />
+        </div>
+        <div class="min-w-0 flex-1">
+          <div class="text-[12px] font-medium text-tx">图片来源与许可</div>
+          <p class="mt-0.5 text-[11px] text-faint">
+            在线图片来自必应与 Pixabay · 查看 Content License
+          </p>
         </div>
         <ArrowRight :size="14" class="shrink-0 text-faint" />
       </button>

@@ -6,6 +6,8 @@
 
 mod bing;
 mod desktop_diag;
+mod http;
+mod pixabay;
 mod thumbs;
 mod wallpaper;
 mod video_wallpaper;
@@ -326,6 +328,53 @@ async fn list_bing_archive_month(
         .map_err(|e| e.to_string())?
 }
 
+/// 拉取一页 Pixabay 搜索结果。
+///
+/// **API key 由前端传入**（用户自填方案）：后端不持有、不落盘、不写日志。
+/// 免费 key 只能拿到 1280px，`PixabayPage::degraded` 会如实反映这一点，
+/// 前端据此提示"申请高清后自动升级"。
+///
+/// 响应在 `pixabay` 模块内缓存 24 小时（Pixabay 的硬性要求），
+/// 同一组参数短时间内重复调用不会真的发请求。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn list_pixabay_wallpapers(
+    key: String,
+    query: String,
+    category: Option<String>,
+    orientation: Option<String>,
+    min_width: Option<u32>,
+    min_height: Option<u32>,
+    colors: Option<String>,
+    order: Option<String>,
+    image_type: Option<String>,
+    editors_choice: Option<bool>,
+    page: u32,
+    per_page: Option<u32>,
+) -> Result<pixabay::PixabayPage, String> {
+    let q = pixabay::Query {
+        key,
+        query,
+        category,
+        orientation,
+        min_width,
+        min_height,
+        colors,
+        order,
+        page,
+        per_page: per_page.unwrap_or(24),
+        lang: None,
+        image_type,
+        // 默认开：`popular` 排序会让 2013-2017 的老图霸榜，
+        // 精选是目前唯一能在参数层面改善观感的手段
+        editors_choice: editors_choice.unwrap_or(true),
+    };
+    // 网络请求为阻塞 IO，放入 blocking 线程避免卡住主线程
+    tauri::async_runtime::spawn_blocking(move || pixabay::fetch_page(&q))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// 下载必应壁纸原图到本地，返回本地绝对路径
 ///
 /// **下载目录不可单独配置**：固定为 `<本地壁纸目录>\BingWallpaper`，由 `directory`
@@ -382,6 +431,133 @@ async fn list_downloaded_bing_wallpapers(
     .map_err(|e| e.to_string())
 }
 
+/// 下载 Pixabay 原图到本地，返回本地绝对路径
+///
+/// 下载目录固定为 `<本地壁纸目录>\Pixabay`（由 `directory` 派生，不可单独配置）。
+/// `url` 是前端列表里那条的 `url` 字段 —— **已经按三档降级选好的最大可用地址**，
+/// 后端不再判断 key 权限（免费 key 拿到的就是 1280px 的地址）。
+/// 同名文件已存在时直接复用，不重复走网络。
+#[tauri::command]
+async fn download_pixabay_wallpaper(
+    url: String,
+    id: u64,
+    directory: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let dir_path = pixabay::download_dir(directory);
+    ensure_asset_scope(&app, &dir_path);
+    tauri::async_runtime::spawn_blocking(move || pixabay::download_wallpaper(&url, id, &dir_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 拉取一页 Pixabay **视频**搜索结果。
+///
+/// 与图片命令分开而不是加一个 `media` 参数：两者参数集与返回结构都不同
+/// （视频没有 `orientation` / `min_width`，多了 `video_type` / `quality`），
+/// 合并成一个命令会让两边都长出一堆"对另一方无意义"的可选参数。
+///
+/// `quality` 是用户偏好（large / medium），解析失败一律回退 1080p；
+/// 每条结果都带 `quality` 字段如实回报**实际拿到的档位**（4K 素材不存在时会降级）。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn list_pixabay_videos(
+    key: String,
+    query: String,
+    category: Option<String>,
+    video_type: Option<String>,
+    orientation: Option<String>,
+    min_width: Option<u32>,
+    min_height: Option<u32>,
+    order: Option<String>,
+    quality: Option<String>,
+    page: u32,
+    per_page: Option<u32>,
+) -> Result<pixabay::PixabayVideoPage, String> {
+    let q = pixabay::VideoQuery {
+        key,
+        query,
+        category,
+        video_type,
+        orientation,
+        min_width,
+        min_height,
+        order,
+        page,
+        per_page: per_page.unwrap_or(24),
+        lang: None,
+        quality: quality.unwrap_or_else(|| "medium".into()),
+    };
+    tauri::async_runtime::spawn_blocking(move || pixabay::fetch_videos(&q))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 下载 Pixabay 视频到本地，返回本地绝对路径。
+///
+/// 落盘文件名 `PixabayVideo_<id>.{mp4|webm}` —— 前缀与图片的 `Pixabay_` 刻意区分：
+/// 图片 id 与视频 id 是独立命名空间，可能撞号。
+#[tauri::command]
+async fn download_pixabay_video(
+    url: String,
+    id: u64,
+    directory: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let dir_path = pixabay::download_dir(directory);
+    ensure_asset_scope(&app, &dir_path);
+    tauri::async_runtime::spawn_blocking(move || pixabay::download_video(&url, id, &dir_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 本地已下载的 Pixabay 图片条目（对应前端 `DownloadedPixabayData`）
+#[derive(serde::Serialize)]
+struct DownloadedPixabayItem {
+    /// Pixabay 图片 id（字符串形式，与在线条目的 onlineId 同格式，作为徽标判定键）
+    id: String,
+    /// 本地绝对路径
+    path: String,
+}
+
+/// 列出**本地壁纸目录**里已下载的 Pixabay 图片（递归找 `Pixabay_<id>.{jpg,png}`）。
+///
+/// 与必应同一套口径：扫的是本地壁纸目录而不是下载目录 —— 只有让判据与
+/// "本地选项卡能否看到"共用同一个事实来源，徽标才不会说谎。
+#[tauri::command]
+async fn list_downloaded_pixabay_wallpapers(
+    directory: Option<String>,
+) -> Result<Vec<DownloadedPixabayItem>, String> {
+    let dir = resolve_save_dir(directory);
+    tauri::async_runtime::spawn_blocking(move || -> Vec<DownloadedPixabayItem> {
+        pixabay::scan_downloaded(&dir)
+            .into_iter()
+            .map(|(id, path)| DownloadedPixabayItem { id, path })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 列出**本地壁纸目录**里已下载的 Pixabay 视频（递归找 `PixabayVideo_<id>.{mp4,webm}`）。
+///
+/// 单独一个命令而不是并进上面那条：前缀与扩展名都不同，
+/// 前端也维护着两份独立的"已下载"集合（图片徽标与视频徽标互不影响）。
+#[tauri::command]
+async fn list_downloaded_pixabay_videos(
+    directory: Option<String>,
+) -> Result<Vec<DownloadedPixabayItem>, String> {
+    let dir = resolve_save_dir(directory);
+    tauri::async_runtime::spawn_blocking(move || -> Vec<DownloadedPixabayItem> {
+        pixabay::scan_downloaded_videos(&dir)
+            .into_iter()
+            .map(|(id, path)| DownloadedPixabayItem { id, path })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// 必应下载目录信息（设置页只读展示用）
 #[derive(Serialize)]
 struct BingDownloadDirInfo {
@@ -425,6 +601,30 @@ async fn get_bing_download_dir_info(
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// Pixabay 下载目录信息（设置页只读展示用）
+///
+/// 与必应不同，Pixabay 从上线起就是**派生目录**，没有老版本遗留的独立目录，
+/// 所以不需要 `legacy_*` 字段，也不像必应那样要扫两个目录。
+#[derive(Serialize)]
+struct PixabayDownloadDirInfo {
+    /// 当前生效的下载目录：`<壁纸目录>\Pixabay`（反斜杠形式，可直接展示）
+    dir: String,
+}
+
+/// 返回 Pixabay 下载目录（`<壁纸目录>\Pixabay`）。
+///
+/// 同 `get_bing_download_dir_info`：**路径派生只在 Rust 侧做一次**，设置页只负责展示。
+/// 前端自己拼 `\Pixabay` 会让"下载到底落在哪"出现第二个事实来源。
+#[tauri::command]
+async fn get_pixabay_download_dir_info(
+    directory: Option<String>,
+) -> Result<PixabayDownloadDirInfo, String> {
+    let dir = pixabay::download_dir(directory);
+    Ok(PixabayDownloadDirInfo {
+        dir: dir.to_string_lossy().replace('/', "\\"),
+    })
 }
 
 /// 在系统资源管理器中定位文件/目录（右键"跳转到当前文件目录"）
@@ -793,9 +993,16 @@ fn main() {
             list_system_wallpapers,
             list_bing_wallpapers,
             list_bing_archive_month,
+            list_pixabay_wallpapers,
+            list_pixabay_videos,
             list_downloaded_bing_wallpapers,
             get_bing_download_dir_info,
+            get_pixabay_download_dir_info,
             download_bing_wallpaper,
+            download_pixabay_wallpaper,
+            download_pixabay_video,
+            list_downloaded_pixabay_wallpapers,
+            list_downloaded_pixabay_videos,
             list_wallpapers_by_paths,
             pick_wallpaper_directory,
             reveal_in_explorer,

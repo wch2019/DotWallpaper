@@ -10,14 +10,28 @@ import {
 
 // 来源选项卡可见性与展示顺序（组合式模块：localStorage 持久化）
 export function useSourceState() {
-  // 各来源选项卡的可见性：local 默认 true、不可关闭；system 默认 false（可在设置开启）；favorites 默认 true；bing 默认 true
+  // 各来源选项卡的可见性。
+  //
+  // **默认只开「本地 + 收藏」**：system / bing / pixabay 一律默认关闭，
+  // 由用户自己在「设置 → 壁纸来源」里打开。
+  // 理由：这三个来源都不是"装好就能用"的 —— 系统壁纸是只读的固定几张，
+  // 必应要联网拉图，Pixabay 还得先填 API key。默认全展开会让新用户第一眼
+  // 看到一堆空列表/加载失败，以为应用坏了。
+  //
+  // local 恒为 true 且不可关闭（应用主源）。
   const sourceVisibility = ref<SourceVisibility>({
     local: true,
     system: false,
     favorites: true,
-    bing: true,
+    bing: false,
+    pixabay: false,
   });
 
+  /// 读取持久化的可见性。
+  ///
+  /// ⚠️ 这里的 `?? false` 是**新的默认口径**，与上面的初始值必须保持一致：
+  /// 老版本写下的对象里可能没有某个键（该来源是后加的），缺键就当"未开启"。
+  /// 用户主动改过的值照原样保留 —— 默认值只影响"从没设置过"的情况。
   function restoreSourceVisibility() {
     try {
       const raw = localStorage.getItem(SOURCE_VIS_KEY);
@@ -25,7 +39,8 @@ export function useSourceState() {
         const parsed = JSON.parse(raw) as Partial<SourceVisibility>;
         sourceVisibility.value.system = parsed.system ?? false;
         sourceVisibility.value.favorites = parsed.favorites ?? true;
-        sourceVisibility.value.bing = parsed.bing ?? true;
+        sourceVisibility.value.bing = parsed.bing ?? false;
+        sourceVisibility.value.pixabay = parsed.pixabay ?? false;
       }
     } catch { /* ignore */ }
   }
@@ -36,12 +51,16 @@ export function useSourceState() {
         system: sourceVisibility.value.system,
         favorites: sourceVisibility.value.favorites,
         bing: sourceVisibility.value.bing,
+        pixabay: sourceVisibility.value.pixabay,
       }));
     } catch { /* ignore */ }
   }
 
   // 仅更新可见性并持久化；"隐藏当前选项卡时自动切回本地"的联动由主 store 的 setSourceVisibility 处理
-  function updateSourceVisibility(key: "system" | "favorites" | "bing", visible: boolean) {
+  function updateSourceVisibility(
+    key: "system" | "favorites" | "bing" | "pixabay",
+    visible: boolean
+  ) {
     sourceVisibility.value[key] = visible;
     persistSourceVisibility();
   }
@@ -57,7 +76,11 @@ export function useSourceState() {
       if (!Array.isArray(parsed)) return;
       const list = parsed.filter(
         (s): s is WallpaperSource =>
-          s === "local" || s === "system" || s === "favorites" || s === "bing"
+          s === "local" ||
+          s === "system" ||
+          s === "favorites" ||
+          s === "bing" ||
+          s === "pixabay"
       );
       // 去重并补全缺失来源，保证数组恰好包含全部来源
       const seen = new Set<WallpaperSource>(list);

@@ -124,8 +124,8 @@ function onKeydown(e: KeyboardEvent) {
     e.preventDefault();
     const target = store.previewTarget;
     if (!target?.path) return;
-    if (target.kind === "bing") {
-      toast("必应在线壁纸不支持收藏", "warning");
+    if (target.kind === "bing" || target.kind === "pixabay") {
+      toast("在线壁纸不支持收藏", "warning");
       return;
     }
     const fav = store.toggleFavorite(target.path);

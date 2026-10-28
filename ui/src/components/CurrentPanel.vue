@@ -94,11 +94,35 @@ const previewSrc = computed(() =>
 
 // ---------- 视频预览（动态壁纸） ----------
 // 选中视频项时右侧改为 <video muted loop autoplay> 实时播放，模拟桌面实际效果；
-// 视频预览不参与壁纸效果（模糊/遮罩只作用于静态图片合成）、样式角标与放大浮层
-const isVideoPreview = computed(() => previewTarget.value?.kind === "video");
+// 视频预览不参与壁纸效果（模糊/遮罩只作用于静态图片合成）、样式角标与放大浮层。
+//
+// **在线视频（Pixabay）也算视频预览**：列表里它的 `path` 是远程 mp4 URL，
+// Pixabay 允许直接嵌入播放，所以预览不必先下载 —— 这也正是"先预览、
+// 设壁纸时才下载"能成立的前提。
+const isVideoPreview = computed(() => {
+  const k = previewTarget.value?.kind;
+  return k === "video" || k === "pixabay-video";
+});
 const videoPlayable = computed(
   () => isVideoPreview.value && isWebviewPlayable(previewTarget.value?.path)
 );
+
+/// 在线视频的补充信息：清晰度档位 · 时长 · 体积。
+/// 体积尤其重要 —— 它让用户在点"下载并设为动态壁纸"**之前**就知道要下多少。
+const videoMetaText = computed(() => {
+  const t = previewTarget.value;
+  if (t?.kind !== "pixabay-video") return "";
+  const parts: string[] = [];
+  const q = t.quality;
+  if (q) {
+    parts.push(
+      q === "large" ? "4K" : q === "medium" ? "1080p" : q === "small" ? "720p" : "480p"
+    );
+  }
+  if (t.duration) parts.push(`${Math.round(t.duration)}s`);
+  if (t.sizeBytes) parts.push(`约 ${(t.sizeBytes / 1048576).toFixed(1)}MB`);
+  return parts.join(" · ");
+});
 const videoRef = ref<HTMLVideoElement | null>(null);
 const videoFailed = ref(false);
 
@@ -864,14 +888,18 @@ function onApplyAsDesktop() {
 // 视频项的"设为壁纸"= 启用动态壁纸；按钮文案随目标类型变化
 const applyLabel = computed(() => {
   if (!isVideoPreview.value) return "设为壁纸";
-  return store.isCurrentVideo(previewTarget.value!) ? "重新应用动态壁纸" : "设为动态壁纸";
+  if (store.isCurrentVideo(previewTarget.value!)) return "重新应用动态壁纸";
+  // 在线视频要先下载才生效，文案提前说明 —— 否则用户点了以为没反应，
+  // 其实是在后台下几十 MB
+  if (previewTarget.value?.kind === "pixabay-video") return "下载并设为动态壁纸";
+  return "设为动态壁纸";
 });
 
 // 视频项禁用条件：路径或播放能力不足时不允许设置（避免置底窗口黑屏）
 const applyDisabled = computed(() => {
   const t = previewTarget.value;
   if (!t || !t.path) return true;
-  if (t.kind === "video") return !isWebviewPlayable(t.path);
+  if (t.kind === "video" || t.kind === "pixabay-video") return !isWebviewPlayable(t.path);
   return false;
 });
 
@@ -986,6 +1014,11 @@ onUnmounted(() => {
         <span class="text-[10.5px] text-white/80">
           {{ videoPlayable ? "动态壁纸" : "不支持的格式" }}
         </span>
+        <!-- 在线视频的档位 / 时长 / 体积。体积必须在**点击下载之前**可见，
+             否则用户不知道点下去要等多久、占多少空间。 -->
+        <span v-if="videoPlayable && videoMetaText" class="text-[10px] text-white/45">
+          {{ videoMetaText }}
+        </span>
       </div>
 
       <!-- 放大预览按钮：图片与视频都支持（视频走浮层内的 <video> 分支）。
@@ -1086,9 +1119,15 @@ onUnmounted(() => {
           <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-accent/90"></span>
           <span class="shrink-0 text-faint">预览</span>
           <span class="min-w-0 truncate text-tx" :title="previewName + '（当前选中，仅预览）'">{{ previewName || "—" }}</span>
-          <!-- 收藏状态：星标展示 + 快捷收藏/取消收藏（必应在线壁纸不支持收藏） -->
+          <!-- 收藏状态：星标展示 + 快捷收藏/取消收藏
+               （必应 / Pixabay 图片 / Pixabay 视频都是在线项，不参与收藏夹书签体系） -->
           <button
-            v-if="previewTarget?.path && previewTarget?.kind !== 'bing'"
+            v-if="
+              previewTarget?.path &&
+              previewTarget?.kind !== 'bing' &&
+              previewTarget?.kind !== 'pixabay' &&
+              previewTarget?.kind !== 'pixabay-video'
+            "
             class="flex shrink-0 cursor-pointer items-center rounded p-0.5 transition-colors hover:bg-white/10"
             :title="previewIsFav ? '已收藏，点击取消收藏' : '收藏该壁纸 (Ctrl+F)'"
             @click.stop="onTogglePreviewFav"
