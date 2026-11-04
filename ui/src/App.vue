@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import {
   NConfigProvider,
   NDialogProvider,
@@ -18,6 +18,7 @@ import ContextMenu from "./components/ContextMenu.vue";
 import DropZone from "./components/DropZone.vue";
 import NaiveBridge from "./components/NaiveBridge.vue";
 import UpdateDialog from "./components/UpdateDialog.vue";
+import FirstRunDialog from "./components/FirstRunDialog.vue";
 import { useWallpaperStore, CLOSE_BEHAVIOR_KEY, AUTOSTART_SHOW_KEY } from "./stores/wallpaper";
 import { toast } from "./lib/naive-host";
 import { useUpdaterStore } from '@/stores/updater'
@@ -26,6 +27,8 @@ import { isStoreBuild } from '@/utils/updater'
 const store = useWallpaperStore();
 const updaterStore = useUpdaterStore();
 const appWindow = getCurrentWindow();
+// 首次启动引导弹窗可见性：未引导过 + 非视频窗口 + 主窗口可见时才弹
+const showFirstRun = ref(false);
 
 // 动态壁纸窗口以 ?view=video 加载：只渲染全屏播放页，不渲染主界面
 const isVideoView = computed(
@@ -176,6 +179,22 @@ async function applyAutostartWindowPref() {
   }
 }
 
+// 更新检查：首次用户完成目录选择之前不联网（"未授权不加载数据"的口径）。
+// 引导完成后统一延后 3s 再查，保持原有的「不抢首屏」时机；老用户恢复标记、
+// 新用户选完目录都走同一条 watch，一次性守卫避免重复请求。
+let updateChecked = false;
+function maybeCheckUpdate() {
+  if (updateChecked || isStoreBuild || !store.isOnboarded) return;
+  updateChecked = true;
+  updaterStore.checkUpdate();
+}
+// 引导完成（老用户恢复标记 / 新用户选完目录）后统一延后 3s 再查，保持原有的
+// 「不抢首屏」时机；未完成引导时 isOnboarded 一直为 false，压根不会联网。
+watch(() => store.isOnboarded, (v) => {
+  if (!v) return;
+  setTimeout(maybeCheckUpdate, 3000);
+});
+
 onMounted(() => {
   // 关闭窗口行为：按设置决定直接退出或隐藏到系统托盘（后台运行）。
   // 托盘图标由后端常驻，左键单击恢复窗口，右键菜单"退出"彻底结束进程。
@@ -201,6 +220,19 @@ onMounted(() => {
 
   // 统一在父组件初始化：先恢复目录记忆与收藏书签，再加载数据
   store.restoreDir();
+  store.restoreOnboard();
+  // 首次启动引导：未引导过、非视频窗口、且主窗口可见时才弹
+  // （autostart 静默后台窗口不可见，此刻弹用户也看不到，下次正常打开再弹）
+  void (async () => {
+    if (store.isOnboarded || isVideoView.value) return;
+    let visible = true;
+    try {
+      visible = await appWindow.isVisible();
+    } catch {
+      /* 取不到可见性时保守弹，避免永远不引导 */
+    }
+    if (visible) showFirstRun.value = true;
+  })();
   store.loadFavorites();
   void store.loadCurrentWallpaper();
   void store.loadDesktopStyle();
@@ -209,7 +241,11 @@ onMounted(() => {
   // 靠 localStorage 里记的"上次生效项"重放一次。**必须在 loadVideoWallpaperState 之后** ——
   // 它内部会回读后端状态来同步面板显示。
   void store.restoreVideoWallpaper();
-  void store.loadWallpapers();
+  // 本地壁纸列表：仅在已引导过（老用户 / 已授权目录）时立即加载。
+  // 首次用户必须先在引导弹窗里选完目录，由 FirstRunDialog 负责加载 —— 不授权不扫描目录。
+  if (store.isOnboarded) {
+    void store.loadWallpapers();
+  }
 
   // 显示器插拔 / 分辨率或缩放变化：后端巡检每 4s 比对配置指纹，变了就发这个事件。
   // 面板上的显示器列表是启动时拉一次的，不刷新的话用户会看到早已拔掉的屏还挂在列表里、
@@ -231,9 +267,9 @@ onMounted(() => {
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("mousedown", onGlobalMouseDown);
   window.addEventListener("blur", store.closeContextMenu);
-  setTimeout(() => {
-    if (!isStoreBuild) updaterStore.checkUpdate()
-  }, 3000)
+  // 首次用户若还没选完目录，这里会因 isOnboarded=false 直接跳过，
+  // 等 markOnboarded 后由上面的 watch 补上（maybeCheckUpdate 保证只查一次）。
+  setTimeout(maybeCheckUpdate, 3000)
 });
 </script>
 
@@ -269,6 +305,8 @@ onMounted(() => {
 
           <!-- 全局更新弹窗（TitleBar / 关于页共用） -->
           <UpdateDialog />
+          <!-- 首次启动引导：选择壁纸目录 -->
+          <FirstRunDialog v-model:show="showFirstRun" />
         </NaiveBridge>
       </n-dialog-provider>
     </n-message-provider>

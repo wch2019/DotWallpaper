@@ -744,8 +744,15 @@ const pixabayKeyInput = ref("");function savePixabayKey() {
   toast("已保存，正在加载…", "success");
 }
 
+// 首次引导结束后目录往往是空的：在空态里给一个真正能点的「下一步」，
+// 而不是留一个空白网格。只改可见性 + 切页签，不动「默认只开本地 + 收藏」的默认值口径。
+async function onEnableBing() {
+  store.setSourceVisibility("bing", true);
+  await store.setSource("bing");
+}
+
 // 滚动接近底部时触发加载更多
-function onScroll() {
+function onScroll () {
   const el = gridWrap.value;
   if (!el) return;
   if (el.scrollTop + el.clientHeight >= el.scrollHeight - 80) {
@@ -1493,6 +1500,20 @@ function onThumbLoad(e: Event) {
                                 : "此目录下暂无图片或视频，可到设置中更换壁纸目录"
               }}
             </p>
+            <!-- 本地目录确实为空时给「下一步」：引导结束后不该是一个空白网格死胡同。
+                 搜索无结果 / 类型筛选造成的空态不显示（切回去就有内容）。 -->
+            <div
+              v-if="store.source === 'local' && !store.localQuery.trim() && store.localFilter === 'all'"
+              class="mt-3 flex flex-col items-center gap-2"
+            >
+              <p class="text-[11.5px] text-faint">把图片 / 视频拖进窗口即可导入，或先看看在线图库</p>
+              <button
+                class="cursor-pointer rounded-md border border-accent/40 bg-accent-soft px-3 py-1 text-[11.5px] text-accent transition-colors hover:bg-accent/20"
+                @click="onEnableBing"
+              >
+                打开必应壁纸
+              </button>
+            </div>
             <!-- 网络失败时给一个就地重试：用户不该为了再试一次去切页签 -->
             <div
               v-if="store.source === 'wallhaven' && store.wallhavenError"

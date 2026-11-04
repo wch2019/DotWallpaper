@@ -10,7 +10,13 @@ import { useFavoritesState } from "./wallpaper/favorites";
 import { baseName, isRemoteSrc } from "./wallpaper/utils";
 import {
   DIR_STORAGE_KEY,
+  ONBOARDED_KEY,
   BING_DIR_KEY,
+  SOURCE_VIS_KEY,
+  SOURCE_ORDER_KEY,
+  CLOSE_BEHAVIOR_KEY,
+  AUTOSTART_SHOW_KEY,
+  FAVORITES_KEY,
   LOCAL_SORTS,
   LOCAL_SORT_KEY,
   PAGE_SIZE,
@@ -400,6 +406,7 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
   // ---- 状态 ----
   const source = ref<WallpaperSource>("local"); // 当前选项卡来源
   const currentDir = ref(""); // 自定义壁纸目录（空 = 预设目录）
+  const isOnboarded = ref(false); // 首次启动引导是否已完成（持久化于 ONBOARDED_KEY）
   const gridItems = ref<WallpaperItem[]>([]); // 左栏当前列表
   const currentWallpaper = ref<WallpaperItem | null>(null); // 右侧当前壁纸
   const previewItem = ref<WallpaperItem | null>(null); // 正在预览的壁纸（选中态，非当前桌面）
@@ -2344,6 +2351,48 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     }
   }
 
+  // 读取"首次启动引导是否已完成"标记。读写一律吞异常（隐私模式不致命）。
+  //
+  // 【升级迁移】老版本没有 ONBOARDED_KEY，但可能已经写过其它配置。这类用户不是新用户：
+  // 若不迁移就会弹首启引导；一旦点了「使用默认目录」，`dot-wallpaper-dir` 会被清掉、
+  // currentDir 置空 —— 文件没丢，但列表突然变空，看起来像壁纸全没了。
+  //
+  // 刻意用**白名单**而不是扫描 `dot-wallpaper-*` 全前缀：store 初始化时会把一些默认值
+  // 归一化落盘（例如 `readPixabayMediaState` 无条件写 PIXABAY_MEDIA_KEY），
+  // 那样会把全新用户也判成老用户，引导永远不弹。下面这些键只在用户主动改过设置时才写。
+  const LEGACY_CONFIG_KEYS = [
+    DIR_STORAGE_KEY, // 自定义壁纸目录（最关键：引导里的「使用默认目录」会清掉它）
+    SOURCE_VIS_KEY, // 改过来源显示 / 隐藏
+    SOURCE_ORDER_KEY, // 改过来源顺序
+    CLOSE_BEHAVIOR_KEY, // 改过关窗行为
+    AUTOSTART_SHOW_KEY, // 改过开机启动的显示方式
+    BING_DIR_KEY, // 老版本单独配过必应下载目录
+    FAVORITES_KEY, // 收藏过壁纸
+  ];
+  function restoreOnboard() {
+    try {
+      if (localStorage.getItem(ONBOARDED_KEY) === "1") {
+        isOnboarded.value = true;
+        return;
+      }
+      if (LEGACY_CONFIG_KEYS.some((k) => !!localStorage.getItem(k))) {
+        markOnboarded(); // 同时补写标记，且完全不改动用户原有的目录配置
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // 标记引导已完成：写持久化键并置位内存状态。App.vue 在用户完成首次目录选择后调用。
+  function markOnboarded() {
+    isOnboarded.value = true;
+    try {
+      localStorage.setItem(ONBOARDED_KEY, "1");
+    } catch {
+      /* ignore */
+    }
+  }
+
   async function pickAndApplyDirectory() {
     try {
       const picked = (await invoke("pick_wallpaper_directory")) as string | null;
@@ -2966,6 +3015,9 @@ export const useWallpaperStore = defineStore("wallpaper", () => {
     // state
     source,
     currentDir,
+    isOnboarded,
+    restoreOnboard,
+    markOnboarded,
     gridItems,
     currentWallpaper,
     previewItem,

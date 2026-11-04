@@ -779,6 +779,13 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 返回默认壁纸目录的真实路径（`USERPROFILE\Pictures`），供首次启动引导展示。
+/// 路径只在 Rust 侧派生一次：前端读不到 USERPROFILE，自己拼只能是 `<用户名>` 占位文本。
+#[tauri::command]
+fn get_default_wallpaper_dir() -> String {
+    resolve_save_dir(None).to_string_lossy().replace('/', "\\")
+}
+
 /// 弹出系统目录选择框，返回用户选择的目录路径（取消时返回 None）
 #[tauri::command]
 fn pick_wallpaper_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
@@ -1134,6 +1141,7 @@ fn main() {
             get_wallhaven_download_dir_info,
             list_wallpapers_by_paths,
             pick_wallpaper_directory,
+            get_default_wallpaper_dir,
             reveal_in_explorer,
             save_dropped_paths,
             delete_wallpaper,

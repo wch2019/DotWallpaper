@@ -132,6 +132,9 @@ export interface ThumbnailUpdatedPayload {
 
 // ---------- 常量 ----------
 export const DIR_STORAGE_KEY = "dot-wallpaper-dir"; // localStorage 持久化键
+/// 首次启动引导是否已完成（值 "1" = 已完成）。
+/// 必须是独立键：因为"恢复默认目录"会清空 `dot-wallpaper-dir`，不能用它判断是否首次使用。
+export const ONBOARDED_KEY = "dot-wallpaper-onboarded";
 /// 【遗留键，只读不写】旧版"必应壁纸下载目录"的 localStorage 键。
 ///
 /// 下载目录现在是**派生**的（`<壁纸目录>\BingWallpaper`，见 `bing::download_dir`），
